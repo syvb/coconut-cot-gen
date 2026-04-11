@@ -2,6 +2,8 @@
 
 > _All code and writing in this repository was produced by Claude (Anthropic)
 > under human direction._
+>
+> _Research supported with Cloud TPUs from Google's TPU Research Cloud (TRC)._
 
 Can we recover readable chain-of-thought text from the continuous latent
 reasoning states of a CODI model? This repo runs the full experiment on
@@ -77,12 +79,18 @@ python scripts/final_report.py    # writes outputs/final_report.txt
 
 ### Multi-host parallelism
 
-`scripts/workers.txt` maps the 16 worker IPs → names. `launch_on_workers.sh`
-runs `setup_worker.sh` on all of them in parallel. The LM-prior sweep
-(`sweep_lm_prior.sh`) is an example of dispatching one config to each of 4
-workers in parallel; `eval_sweep_all.sh` does the same for the behavioral
-evaluations. Each worker runs independently on its own 4 chips — there is
-no XLA multi-host SPMD, just embarrassingly-parallel job distribution.
+First populate the local worker map from GCE metadata (gitignored):
+
+```bash
+bash scripts/discover_workers.sh    # writes scripts/workers.txt
+```
+
+`launch_on_workers.sh` runs `setup_worker.sh` on every non-primary host in
+parallel. The LM-prior sweep (`sweep_lm_prior.sh`) dispatches one config
+per worker — edit the `LM_WEIGHTS` array to change the sweep. `collect_sweep.sh`
+/ `wait_evals.sh` pull results back. Each worker runs independently on
+its own 4 chips; there is no XLA multi-host SPMD, just embarrassingly
+parallel job distribution.
 
 ## Pipeline detail
 
@@ -278,12 +286,12 @@ scripts/
   evaluate_lmprior.py         # behavioral eval for LM-prior outputs
   slice_K32_to_128.py         # slice full K=32 results to first 128 for fair comparison
 
-  # multi-host infra
-  workers.txt                 # IP ↔ worker-N mapping for the 16-host pod
+  # multi-host infra (workers.txt is gitignored — generate with discover_workers.sh)
+  discover_workers.sh         # write workers.txt from GCE metadata
   setup_worker.sh             # install deps + download model on a worker
-  launch_on_workers.sh        # parallel setup across all 15 non-primary hosts
+  launch_on_workers.sh        # parallel setup across all non-primary hosts
   run_on_worker.sh            # single-worker wrapper (git pull + command)
-  sweep_lm_prior.sh           # dispatch an lm_w config to each of 4 workers
+  sweep_lm_prior.sh           # dispatch LM_WEIGHTS configs across workers
   eval_sweep_all.sh           # dispatch behavioral eval per worker
   collect_sweep.sh, wait_sweep.sh, wait_evals.sh  # collection helpers
 

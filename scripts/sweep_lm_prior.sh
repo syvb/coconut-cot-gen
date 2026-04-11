@@ -1,6 +1,7 @@
 #!/bin/bash
-# Sweep LM prior configs in parallel across workers (4 configs → 4 workers).
-# Each worker runs step2_lm_prior on the SAME 64 problems with a different lm_weight.
+# Sweep LM prior configs in parallel across workers (one lm_weight per worker).
+# Assigns configs to worker-1 .. worker-N (skips worker-0, which is primary).
+# Requires scripts/workers.txt populated; run scripts/discover_workers.sh first.
 set -e
 
 TARGETS="data/targets_500.pt"
@@ -10,18 +11,25 @@ K=32
 SHARPNESS=50.0
 BATCH=8
 
-# (lm_weight, worker_ip, worker_name)
-declare -a CONFIGS=(
-    "0.1 10.164.0.48 w-1"
-    "0.3 10.164.0.41 w-2"
-    "1.0 10.164.0.38 w-3"
-    "3.0 10.164.0.40 w-4"
-)
+# lm_weight values to sweep — one per worker (in worker-1..N order)
+LM_WEIGHTS=(0.1 0.3 1.0 3.0)
 
-for cfg in "${CONFIGS[@]}"; do
-    lm_w=$(echo $cfg | awk '{print $1}')
-    ip=$(echo $cfg | awk '{print $2}')
-    name=$(echo $cfg | awk '{print $3}')
+if [ ! -f scripts/workers.txt ]; then
+    echo "scripts/workers.txt not found. Run scripts/discover_workers.sh first." >&2
+    exit 1
+fi
+
+# Get the IPs of worker-1, worker-2, ... (excluding worker-0)
+mapfile -t WORKER_IPS < <(awk '$2!="w-0"{print $1}' scripts/workers.txt)
+
+if [ ${#WORKER_IPS[@]} -lt ${#LM_WEIGHTS[@]} ]; then
+    echo "need ${#LM_WEIGHTS[@]} workers but only ${#WORKER_IPS[@]} available" >&2
+    exit 1
+fi
+
+for i in "${!LM_WEIGHTS[@]}"; do
+    lm_w=${LM_WEIGHTS[$i]}
+    ip=${WORKER_IPS[$i]}
     tag="lmw${lm_w}_shp${SHARPNESS}_K${K}_N${N}"
     out="data/sweep_${tag}.pt"
     log="/tmp/sweep_${tag}.log"
@@ -34,9 +42,8 @@ for cfg in "${CONFIGS[@]}"; do
         --lm_weight $lm_w --lm_sharpness $SHARPNESS \
         --lm_ref base --lm_exclude_specials \
         > $log 2>&1"
-    echo "dispatching lm_weight=$lm_w to $name ($ip)"
-    ssh -f -o BatchMode=yes -o StrictHostKeyChecking=no $ip \
-        "cd coconut-cot-gen && git pull --quiet 2>&1 && $cmd &" &
+    echo "dispatching lm_weight=$lm_w to worker $((i+1))"
+    ssh -o BatchMode=yes -o StrictHostKeyChecking=no $ip \
+        "cd coconut-cot-gen && git pull --quiet 2>&1 && nohup bash -c '$cmd' >/dev/null 2>&1 &"
 done
-wait
 echo "all launched"

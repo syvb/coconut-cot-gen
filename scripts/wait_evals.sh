@@ -2,20 +2,25 @@
 # Wait for eval jobs and collect their log files.
 set -e
 
-JOBS=(
-    "10.164.0.48 /tmp/eval_sweep_lmw0.1_shp50.0_K32_N64.log"
-    "10.164.0.41 /tmp/eval_sweep_lmw0.3_shp50.0_K32_N64.log"
-    "10.164.0.38 /tmp/eval_sweep_lmw1.0_shp50.0_K32_N64.log"
-    "10.164.0.40 /tmp/eval_sweep_lmw3.0_shp50.0_K32_N64.log"
-)
+LM_WEIGHTS=(0.1 0.3 1.0 3.0)
+SHARPNESS=50.0
+K=32
+N=64
+
+if [ ! -f scripts/workers.txt ]; then
+    echo "scripts/workers.txt not found. Run scripts/discover_workers.sh first." >&2
+    exit 1
+fi
+mapfile -t WORKER_IPS < <(awk '$2!="w-0"{print $1}' scripts/workers.txt)
 
 mkdir -p outputs/sweep_evals
 
 for attempt in $(seq 1 60); do
     all_done=1
-    for job in "${JOBS[@]}"; do
-        ip=$(echo $job | awk '{print $1}')
-        running=$(ssh -o BatchMode=yes $ip "pgrep -xf 'python scripts/evaluate_lmprior.py --lmprior .*' > /dev/null && echo Y || echo N" 2>&1 || echo Y)
+    for i in "${!LM_WEIGHTS[@]}"; do
+        ip=${WORKER_IPS[$i]}
+        running=$(ssh -o BatchMode=yes $ip \
+            "pgrep -f 'python scripts/evaluate_lmprior.py' > /dev/null && echo Y || echo N" 2>&1 || echo Y)
         if [ "$running" = "Y" ]; then
             all_done=0
             break
@@ -27,9 +32,11 @@ for attempt in $(seq 1 60); do
     sleep 60
 done
 
-for job in "${JOBS[@]}"; do
-    ip=$(echo $job | awk '{print $1}')
-    log=$(echo $job | awk '{print $2}')
+for i in "${!LM_WEIGHTS[@]}"; do
+    ip=${WORKER_IPS[$i]}
+    lm_w=${LM_WEIGHTS[$i]}
+    log="/tmp/eval_sweep_lmw${lm_w}_shp${SHARPNESS}_K${K}_N${N}.log"
     dest="outputs/sweep_evals/$(basename $log)"
-    scp -q $ip:$log $dest 2>&1 && echo "pulled $(basename $log)" || echo "failed $log from $ip"
+    scp -q $ip:$log $dest 2>&1 && echo "pulled $(basename $log)" \
+        || echo "failed $log from worker $((i+1))"
 done
