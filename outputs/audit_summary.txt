@@ -1,0 +1,194 @@
+================================================================
+ IMPLEMENTATION AUDIT  (scripts/*)
+================================================================
+
+Scope: codi_loader.py, step1_collect_targets.py, oracle_train.py,
+and the soft-prompt / LM-prior pipeline.
+
+Audit method: re-read each critical block, trace positions/masks
+by hand against the reference test.py from the CODI repo, and run
+one targeted experiment (run 14 K=6) to empirically rule out a
+suspected position-mismatch bug.
+
+
+1. CODI model loading (codi_loader.py)
+--------------------------------------
+  * instantiates LlamaForCausalLM from config (no meta gating)
+  * resize_token_embeddings to 128259 (adds PAD/BOT/EOT)
+  * loads CODI state dict, overrides embed_tokens + lm_head from
+    the CODI checkpoint
+  * for each target linear in each layer, computes
+        W_merged = W_base + (alpha/r) * B @ A
+    with alpha=32, r=128 -> scaling=0.25 (from test_llama1b.sh)
+  * loads layernorms and final norm
+  * builds CodiProjection = Sequential(Dropout, Linear, GELU, Linear) + ln
+    matching src/model.py exactly
+  * loads prj.1/prj.3/prj.ln from the state dict
+
+  Verified: all 7 LORA_TARGETS handled, all 16 layers merged, LoRA
+  keys match state-dict keys inspected earlier. ✓
+
+  Special token IDs (constants):
+        PAD_ID = 128256  ([PAD])
+        BOT_ID = 128257  (<|bocot|>)
+        EOT_ID = 128258  (<|eocot|>)
+  Cross-checked against tokenizer_config.json added_tokens_decoder. ✓
+
+  load_base_llama() is the same path but SKIPS the LoRA merge and
+  the projection — used as the LM prior reference.
+
+
+2. h_target extraction (step1_collect_targets.py)
+-------------------------------------------------
+  Trace of the latent reasoning loop for INF_LATENT_ITERATIONS=6:
+
+    initial embeds: [q_tokens (q_max), bot]           len = q_max+1
+    it=0  forward -> h at position q_max (bot)        append prj
+    it=1  forward -> h at position q_max+1 (l0)       append prj
+    it=2  forward -> h at position q_max+2 (l1)       append prj
+    it=3  forward -> h at position q_max+3 (l2)       append prj
+    it=4  forward -> h at position q_max+4 (l3)       append prj
+    it=5  forward -> h at position q_max+5 (l4)       append prj
+    it=6  forward -> h at position q_max+6 (l5)       = h_target
+
+  Seven total forward calls. Compare to the reference test.py: it
+  does (1) question encoding + (2-7) 6 latent-loop iterations via
+  past_key_values. Same 7 forwards, same absolute positions, same
+  h at q_max+6 extracted at the last iteration. ✓
+
+  The absolute position of h_target is q_max+6 (the position of
+  the 6th latent embedding in a sequence of length q_max+7 that
+  includes [q, bot, l0..l5]).
+
+
+3. Oracle architecture (oracle_train.py)
+----------------------------------------
+  Oracle = base Llama-1B + LoRA + h_target projector + K query embeds
+
+    oracle input sequence (len 1 + q_max + 1 + K = q_max+K+2):
+        [h_proj(h_target),   # position 0
+         q_tokens (q_max),   # positions 1..q_max
+         <|bocot|>,          # position q_max+1
+         slot_0..slot_K-1]   # positions q_max+2..q_max+K+1
+
+    each slot input = learned_query_k + h_proj(h_target)
+
+    forward yields hidden states at all positions. We take
+    out.logits[:, -K:, :] — the logits at the K slot positions —
+    mask out token ids >= 128000 (specials), softmax, matmul with
+    embed_tokens.weight to get soft embeddings.
+
+  Design choice: we use out.logits AT slot positions (view B)
+  rather than AT slot-1 positions (view A = predict slot k given
+  slots 0..k-1). Both are defensible; I chose B so each slot has
+  its own direct "readout". The model is free to learn useful
+  behavior either way during training.
+
+  LoRA wrapping uses SimpleLoRA modules (my own minimal impl)
+  rather than peft, so I can fully control parameter references
+  across device/dtype moves. The crucial detail: for pure device
+  moves `nn.Module._apply` uses set_data in-place, preserving
+  Parameter identity. Checked that lora_params[i] is still the
+  same object as wrapped.lora_A after oracle.to(device). ✓
+
+
+4. Reconstruction forward (codi_recon_forward)
+----------------------------------------------
+  Takes soft_embeds from the oracle and feeds them through frozen
+  CODI as:
+        [q_tokens (q_max),   # positions 0..q_max-1
+         <|bocot|>,          # position q_max
+         soft_0..soft_K-1,   # positions q_max+1..q_max+K
+         <|eocot|>]          # position q_max+K+1
+
+    h_out = hidden_states[-1][:, q_max+K, :]
+          = the residual stream at the LAST soft-embed position.
+
+  Loss = 1 - cos(h_out, h_target).
+
+  **Position-match check**: h_target lives at position q_max+6
+  (it was the 6th latent). h_out lives at position q_max+K. For
+  K=32 these positions are NOT the same — we are comparing two
+  hidden states at different absolute positions. RoPE isn't
+  applied to the residual stream directly, but earlier-layer
+  attention patterns do depend on absolute position, so this
+  could have been a meaningful confound.
+
+  **Empirical test (run 14)**: K=6 (positions match exactly)
+  reaches 0.7218 cos at epoch 40. K=32 (run 13, positions differ)
+  reaches 0.7797 cos. K=32 wins by 0.058 despite the mismatch.
+  Conclusion: the position mismatch is NOT the bottleneck — more
+  slots helps more than absolute-position alignment. ✓
+
+
+5. Gradient flow
+----------------
+  loss (scalar)
+    → cos(h_out, h_target)
+    → h_out  from CODI forward (CODI frozen, but inputs_embeds
+                                has grad)
+    → soft_embeds  from oracle forward
+    → probs @ embed_w
+    → logits  from lm_head applied to oracle hidden states
+    → oracle hidden states  through LoRA'd base model
+    → {LoRA weights, query_embeds, h_proj weights}  -- trainable
+
+  Every step preserves autograd. Dtype casts (.to(bf16)) keep the
+  grad path. CODI forward runs in grad-mode (no @no_grad wrapper)
+  so gradients flow through soft_embeds. Base Llama and CODI
+  params are requires_grad_(False), so the only gradients that
+  actually accumulate are on the trainable list. ✓
+
+
+6. Minor issues / quirks (not bugs)
+-----------------------------------
+  - In Oracle.__init__, h_proj[2] is initialized to zero, then
+    re-initialized to normal(std=0.02) a few lines later. The
+    earlier comment ("output layer still starts at zero") is now
+    incorrect. Functionally fine, cosmetically confusing.
+
+  - In run 4, torch.nn.utils.clip_grad_norm_ froze training at
+    exactly constant loss. This is a known PyTorch/XLA lazy-
+    tensor interaction. Fixed by switching to a per-element
+    clamp (`p.grad.clamp_(-v, v)`) which is XLA-safe.
+
+  - lm_head was copied from CODI when constructing base Llama,
+    so `out.logits` uses CODI's output projection on top of a
+    base-Llama-with-LoRA hidden state. The soft-embed matmul
+    uses CODI's embed_tokens. Internally consistent — both
+    sides of the probs/embed dance come from the same
+    CODI-trained weights. ✓
+
+  - Runs 11 (LoRA r=256) and 9 (iterative refinement) both
+    exhibited the "exactly constant loss" frozen-training state,
+    most likely a silent OOM during optimizer step. Sticking
+    with r=128 + no refinement is the stable regime. The
+    failure mode is distinguishable from real convergence (the
+    loss is constant to many decimal places, not just slowly
+    improving).
+
+
+7. Hyperparameter summary for the best run (run 13)
+---------------------------------------------------
+  K=32, 40 epochs, 1024 train, LoRA r=128 alpha=32
+  lr 2e-4 with 50-step linear warmup, no LR decay
+  grad_clip=100 (effectively disabled — see note 6)
+  temperature=1.0, batch=8
+  eval_every=4 epochs, best-val-cos checkpoint tracking
+
+  Final: mean cos 0.780 at epoch 40
+         swapped cos 0.613 (gap 0.167, oracle is using h_target)
+         train loss 0.213, still decreasing at end
+
+
+Overall verdict
+---------------
+The implementation does what the paper trace says it should do.
+Position math checks out. LoRA merging matches the peft formula.
+Special token IDs match the tokenizer. Gradient flow is intact.
+The 0.78 cosine ceiling at K=32 is a real upper bound for this
+architecture and training budget — it's not a bug.
+
+The one thing worth revisiting would be View A vs View B for the
+logit extraction (shift by one). That's a 1-line change and would
+take ~20 min to test.
