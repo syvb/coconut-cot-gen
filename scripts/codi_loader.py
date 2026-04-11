@@ -49,6 +49,55 @@ def _merge_lora_into_linear(state_dict, prefix, base_weight):
     return base_weight.to(torch.float32) + delta
 
 
+def load_base_llama(dtype=torch.bfloat16, device="cpu"):
+    """Load a fresh Llama-3.2-1B with CODI's embed_tokens/lm_head but WITHOUT LoRA/prj.
+
+    This is the 'reference language model' — same tokenizer/embeds as CODI, but
+    with the unadapted base weights. Useful as an LM prior on soft prompt opt.
+    """
+    print("instantiating base Llama (no LoRA)")
+    config = AutoConfig.from_pretrained(CKPT_DIR)
+    config.torch_dtype = dtype
+    model = AutoModelForCausalLM.from_config(config, torch_dtype=dtype)
+    model.resize_token_embeddings(128259)
+
+    sd = torch.load(os.path.join(CKPT_DIR, "pytorch_model.bin"), map_location="cpu", weights_only=False)
+
+    # Embeds + head
+    with torch.no_grad():
+        model.model.embed_tokens.weight.copy_(
+            sd["codi.base_model.model.model.embed_tokens.weight"].to(dtype)
+        )
+        model.lm_head.weight.copy_(sd["codi.base_model.model.lm_head.weight"].to(dtype))
+
+    n_layers = len(model.model.layers)
+    for li in range(n_layers):
+        layer = model.model.layers[li]
+        for module_name in LORA_TARGETS:
+            if module_name in ("q_proj", "k_proj", "v_proj", "o_proj"):
+                module = getattr(layer.self_attn, module_name)
+                hf_prefix = f"codi.base_model.model.model.layers.{li}.self_attn.{module_name}"
+            else:
+                module = getattr(layer.mlp, module_name)
+                hf_prefix = f"codi.base_model.model.model.layers.{li}.mlp.{module_name}"
+            # Load BASE weight only (skip LoRA — that's what "base" means)
+            with torch.no_grad():
+                module.weight.copy_(sd[f"{hf_prefix}.base_layer.weight"].to(dtype))
+        with torch.no_grad():
+            layer.input_layernorm.weight.copy_(
+                sd[f"codi.base_model.model.model.layers.{li}.input_layernorm.weight"].to(dtype)
+            )
+            layer.post_attention_layernorm.weight.copy_(
+                sd[f"codi.base_model.model.model.layers.{li}.post_attention_layernorm.weight"].to(dtype)
+            )
+    with torch.no_grad():
+        model.model.norm.weight.copy_(sd["codi.base_model.model.model.norm.weight"].to(dtype))
+
+    if device != "cpu":
+        model = model.to(device)
+    return model
+
+
 def load_codi(dtype=torch.bfloat16, device="cpu"):
     """Load llama base, swap in CODI's embeddings, merge LoRA, attach projection.
 

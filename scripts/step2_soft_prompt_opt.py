@@ -41,6 +41,10 @@ def parse_args():
     p.add_argument("--loss", choices=["cos", "mse"], default="cos")
     p.add_argument("--n", type=int, default=-1, help="limit number of problems (-1 = all)")
     p.add_argument("--init_std", type=float, default=0.02)
+    p.add_argument("--reg_weight", type=float, default=0.0,
+                   help="weight on the 'pull soft embedding toward nearest real token' penalty.")
+    p.add_argument("--reg_exclude_specials", action="store_true",
+                   help="restrict nearest-token search to non-special tokens (<128000, no PAD/BOT/EOT)")
     return p.parse_args()
 
 
@@ -58,6 +62,20 @@ def main():
     model = model.to(device)
     embed_layer = model.get_input_embeddings()
     H = model.config.hidden_size
+
+    # Precompute normalized embedding matrix for the token-proximity regularizer.
+    # Exclude specials if requested so the prior doesn't just collapse to <|eocot|>/<|begin_of_text|>.
+    with torch.no_grad():
+        embed_w = embed_layer.weight.detach().to(torch.float32)  # (V, H)
+        V = embed_w.size(0)
+        embed_w_masked = embed_w.clone()
+        if args.reg_exclude_specials:
+            # zero out specials so they score 0 cosine (won't ever be the argmax)
+            for sid in (PAD_ID, BOT_ID):
+                embed_w_masked[sid] = 0
+            # End-of-turn / reserved tokens: 128000..V-1 (excludes actual text tokens below 128000)
+            embed_w_masked[128000:] = 0
+        embed_norm = F.normalize(embed_w_masked, dim=-1).to(torch.bfloat16).to(device)  # (V, H)
 
     print("loading targets:", args.targets, flush=True)
     data = torch.load(args.targets, weights_only=False)
@@ -111,10 +129,21 @@ def main():
             h_out = out.hidden_states[-1][:, -1, :].to(torch.float32)  # (B, H)
 
             if args.loss == "cos":
-                loss_per = 1.0 - F.cosine_similarity(h_out, b_target, dim=-1)  # (B,)
+                recon_per = 1.0 - F.cosine_similarity(h_out, b_target, dim=-1)  # (B,)
             else:  # mse
-                loss_per = ((h_out - b_target) ** 2).mean(dim=-1)
-            loss = loss_per.mean()
+                recon_per = ((h_out - b_target) ** 2).mean(dim=-1)
+            recon_loss = recon_per.mean()
+
+            if args.reg_weight > 0:
+                # For each (b, k) in `soft`, pull it close to its nearest token embedding.
+                soft_norm = F.normalize(soft, dim=-1).to(torch.bfloat16)  # (B, K, H)
+                sims = soft_norm.reshape(-1, H) @ embed_norm.t()  # (B*K, V)
+                max_sims = sims.max(dim=-1).values  # (B*K,)
+                reg_loss = (1.0 - max_sims.to(torch.float32)).mean()
+                loss = recon_loss + args.reg_weight * reg_loss
+            else:
+                reg_loss = torch.zeros((), device=device)
+                loss = recon_loss
             loss.backward()
             opt.step()
             xm.mark_step()
@@ -123,7 +152,9 @@ def main():
                 with torch.no_grad():
                     cos = F.cosine_similarity(h_out, b_target, dim=-1).mean()
                 print(
-                    f"  batch {bi+1}/{n_batches} step {step:4d}  loss={loss.item():.4f}  cos={cos.item():.4f}",
+                    f"  batch {bi+1}/{n_batches} step {step:4d}  "
+                    f"recon={recon_loss.item():.4f}  reg={reg_loss.item():.4f}  "
+                    f"cos={cos.item():.4f}",
                     flush=True,
                 )
 
