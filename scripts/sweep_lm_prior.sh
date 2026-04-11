@@ -8,7 +8,7 @@ N=64
 STEPS=500
 K=32
 SHARPNESS=50.0
-BATCH=16
+BATCH=8
 
 # (lm_weight, worker_ip, worker_name)
 declare -a CONFIGS=(
