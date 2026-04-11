@@ -132,7 +132,7 @@ Where this leaves us
 --------------------
 This experiment tightens the picture from the earlier per-problem work:
  - per-problem optimization: cos≈0.99, tokens adversarial, 0% readable
- - amortized oracle:         cos≈0.75, tokens semi-structured (latex/code),
+ - amortized oracle:         cos≈0.78, tokens semi-structured (latex/code),
                              weakly h_target-dependent, still not natural
                              English
  - empty structural wrapper: cos N/A, 64% CODI behavior recovered
@@ -142,13 +142,70 @@ setting where decoded tokens carry problem-type information that
 corresponds to h_target content. That is a genuine (if weak) interpretability
 signal.
 
+
+UPDATE: training-stability fixes (runs 5-13)
+-------------------------------------------
+Later experiments ran with a more rigorous training loop:
+ - XLA-safe per-element grad clip (avoids the clip_grad_norm_ lazy-tensor
+   interaction that froze run 4 at exactly constant loss)
+ - LR cosine decay to 10% (run 6 — made training stable but converged
+   to pure-punctuation samples)
+ - Best-validation checkpoint tracking
+
+Runs 6-13 verify several things that changed the interpretation:
+
+1. The earlier "collapse past epoch 12" in runs 3 and 5 was an LR / clip
+   problem, not a fundamental training wall. With proper stable hyperparams
+   the loss keeps decreasing.
+
+2. The "~0.75 ceiling" seen in runs 5-10 was UNDERTRAINING. Run 13
+   (run 7's hyperparams, extended to 40 epochs) reaches 0.780 at epoch 40,
+   still improving at about 0.0003/epoch. Prior runs stopped at 18-25 epochs.
+
+3. K=64 (run 8) performs WORSE than K=32 under amortization (0.673 vs 0.780).
+   More slots hurt because each slot must encode something useful across all
+   training problems, and coordinating 64 slots is harder than 32.
+
+4. no_query_embeds (run 10) also hurts: 0.673. The learned per-slot backbone
+   embeddings serve a real purpose — they give the model a handle for slot
+   specialization beyond just positional encoding.
+
+5. LoRA r=256 (run 11) and iterative refinement (run 9) both silently
+   broke training — loss stuck at a constant — probably due to OOM
+   artifacts. Run 13 sticks with r=128 which is stable.
+
+Final best number: run 13 reaches **0.780 mean test cosine** at epoch 40,
+with swapped_cos=0.613 (gap 0.167, same as earlier runs — oracle uses
+h_target consistently regardless of ceiling). Train loss is still
+decreasing, but slowly.
+
+Decoded samples at run 13 epoch 40:
+    gold=18:   'angelog اطंतरंतरISO++);\n legally certo hereby_req_reqISO_req...'
+    gold=3:    ' HTTP Orwell Orwell Orwell ... ImGui ... />;\n />;\n />;\n...'
+    gold=70000:' Trusted اط اط اط Trusted hereby legally legally hereby_req...'
+    gold=540:  ' Trusted اط اط اط Trusted hereby legally legally hereby_req...'
+    gold=20:   'angelog.remove اطंतर Trusted++);\n legally certo hereby_req...'
+
+Still not natural English. The tokens are a mix of programming (`hereby_req`,
+`++);\n`, `<>();`, `/>\n`), legal/formal English (`legally`, `Trusted`,
+`hereby`, `Orwell`), and multilingual filler (Arabic اط, Hindi ंतर).
+
+There IS light clustering by answer value: gold=540 and 70000 both lean
+on `Trusted hereby legally`, while gold=18 and 20 lean on
+`angelog اط certo`. So the oracle is still h_target-sensitive — it just
+prefers exotic/formal token regions over natural math reasoning.
+
+
 Things to try next
 ------------------
  - autoregressive decoding (each query conditions on previous soft embed)
- - teacher-forced SFT warm-start on the GSM8K gold CoT, then RL with
-   reconstruction reward
- - fix grad clipping (probably move to grad value clamping or Adam's
-   own mechanisms) to allow longer stable training
+ - teacher-forced SFT warm-start on the GSM8K gold CoT, then continue
+   with reconstruction loss
  - patchscopes-style comparison: how does the oracle's decoded output
    compare to what you get by just patching h_target into a
    "In other words, " prompt and letting the base model generate?
+ - restart Adam state at a plateau: continue run 13's weights but with a
+   fresh optimizer, in case the decaying momentum is preventing further
+   improvement
+ - blocking weighted entropy over filler tokens to push away from the
+   '_req_req' attractor region
