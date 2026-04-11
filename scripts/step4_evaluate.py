@@ -78,6 +78,13 @@ def main():
     projected_ids = proj["projected_ids"]  # (N, K)
     K = proj["K"]
     N = projected_ids.size(0)
+    # truncate targets to N (some K-sweep runs use fewer problems)
+    q_only_ids = q_only_ids[:N]
+    q_only_mask = q_only_mask[:N]
+    questions = questions[:N]
+    gold_answers = gold_answers[:N]
+    codi_pred_answers = codi_pred_answers[:N]
+    codi_pred_texts = codi_pred_texts[:N]
     print(f"N={N} K={K}")
 
     # Build the input sequence per problem.

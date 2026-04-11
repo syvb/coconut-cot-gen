@@ -1,0 +1,182 @@
+======================================================================
+ LATENT REASONING ORACLE: PIPELINE RESULTS
+======================================================================
+
+Model: bcywinski/codi_llama1b-answer_only  (CODI on Llama-3.2-1B-Instruct)
+Dataset: GSM8K test split, first 512 problems
+Device: TPU v5litepod (single host = 4 v5e chips)
+
+CODI greedy baseline (reference model): 199/512 = 38.87% gold accuracy
+
+======================================================================
+ A.  SOFT-PROMPT RECONSTRUCTION QUALITY
+======================================================================
+
+Each problem: K learnable embeddings optimized 500 steps with Adam lr=1e-2
+to minimize 1 - cos(h_output, h_target).  h_target = last-layer residual
+stream at the final latent reasoning position (i.e., CODI's state right
+before text generation begins).
+
+                                  pct cos > 
+   K    N    mean    median   min   0.95    0.99
+   16  128  0.9859  0.9986  0.0442   96.9%   96.9%
+   32  512  0.9833  0.9993  0.1060   96.9%   96.1%
+   64  128  0.9991  0.9996  0.9736  100.0%   98.4%
+
+Histogram (K=32, N=512, bins 0.0-1.0):
+  [0.000, 0.050)    0 | 
+  [0.050, 0.100)    0 | 
+  [0.100, 0.150)    1 | 
+  [0.150, 0.200)    0 | 
+  [0.200, 0.250)    2 | 
+  [0.250, 0.300)    1 | 
+  [0.300, 0.350)    1 | 
+  [0.350, 0.400)    1 | 
+  [0.400, 0.450)    2 | 
+  [0.450, 0.500)    2 | 
+  [0.500, 0.550)    0 | 
+  [0.550, 0.600)    0 | 
+  [0.600, 0.650)    2 | 
+  [0.650, 0.700)    0 | 
+  [0.700, 0.750)    0 | 
+  [0.750, 0.800)    0 | 
+  [0.800, 0.850)    1 | 
+  [0.850, 0.900)    3 | 
+  [0.900, 0.950)    0 | 
+  [0.950, 1.000)  496 | ##################################################
+
+>>> Conclusion A: the reconstruction target (CODI's post-reasoning hidden
+    state) is reliably reachable from soft prompts. With K=32, 96.9% of
+    problems reach cos>0.95; with K=64 every problem does (min 0.974).
+    Soft prompts can find the point in activation space.
+
+======================================================================
+ B.  NEAREST-TOKEN PROJECTION  (semantic coherence)
+======================================================================
+
+Each soft vector is projected to the nearest token by cosine similarity
+against the embed_tokens matrix. We inspect the decoded sequences.
+
+Sample decoded sequences (sorted by reconstruction cosine):
+
+--- K=16 ---
+  Best (cos=0.9994):  Len| refrain| 【| لف|CM|.
+| constituted|。
+|ri|}}| یاد| Fill|!
+|forcements| Brown| Granny
+  Median (cos=0.9986):  SSP|<|begin_of_text|>| generic|<|eocot|>| month|application| panels|[PAD]| всё| income|्‍|72| a|...
+|挥| subscribed
+  Worst (cos=0.0442): aps|ыт| Shaw| sodium| films|を|velop|
+| ii| are|,|.
+| include| Urs| روش|：
+
+--- K=32 ---
+  Best (cos=0.9997):   actually|adar|275| ~|/u| altercation|<|begin_of_text|>|.| Electric| مقاو|}
+| Evo|IALIZ| Permission|-|ing|]]|||.|240| oči|?|109| child|rx| далі| pok| Collins|.pool|<|eocot|>|	display| "]");
+
+  Median (cos=0.9993): <|eocot|>|!|‘| colleague|strt|<|eocot|>| measurable|Res|ort|ぎ|老师| MY|emetery|inh| ErrorResponse|uns| website| Edwin| Terry|<|eocot|>|Vs| Mour|free|<|eocot|>|<|eocot|>| portraits|ld|_attr|  
+|.expression| Number|_http
+  Worst (cos=0.1060):  |<|begin_of_text|>|('//*[@| grocery|FirstChild|ine|	f|ories| resumes| 國| notes|.
+| |gh|.|ิเวณ| Kh|<|begin_of_text|>|ller|<|eocot|>|....| дел| the| one|€™|_unknown| =|_MOBILE| actual|_Q|-platform| cler
+
+--- K=64 ---
+  Best (cos=0.9998):  justice|49| bilateral| предлож| | Since| letter| be| hp|G| 小| 국|,| can| nem|.P|.|}.
+|<|eocot|>|')
+| object|.|%,| вещества|.
+|端| posicion| Car| water|.DataBindings| appointed|,
+|nbsp| мис| Every| capitalism|,p| Matt| Andrew| acab| toh|ación| careers| 
+  Median (cos=0.9996): CONF| fotbal|	elsif| padding|.
+| funnel| Z|ibilidade| Mp| <|•| Suz| rins| formulated|enha|.SP| ci|.exe|                                              | realidad| Council| rates| |"]|?| pardon|isl| Gene|:
+
+
+| л| SCM|     | J| Guerr| y|[PAD]|，| April|^-
+  Worst (cos=0.9736): af| Ha| ^{[|routes|4| get| такие| دوربین| Recipes|<|begin_of_text|>|,
+| GPL|516| alteration| Ли|££| |共| „|-al|.
+
+| Silent| £|.| Prison|avored|ิจารณ|St|prev|;o|_warnings|For|-S|.
+|[w|<|begin_of_text|>| Ro| beginner|ैं।
+
+| }>
+| mars| sonraki| of| movie
+
+>>> Conclusion B: the projected transcripts are complete gibberish.
+    No math-related tokens, numbers, or intermediate calculations are
+    visible. The tokens are a mix of rare unicode, code fragments,
+    special tokens like <|eocot|> and <|begin_of_text|>, and miscellaneous
+    vocabulary noise. This is the classic Goodhart failure: the soft-prompt
+    optimization is finding activation-space shortcuts that have essentially
+    no connection to the tokens in the neighborhood of the solution.
+
+======================================================================
+ C.  BEHAVIORAL EQUIVALENCE
+======================================================================
+
+We feed the projected token sequences back in as ACTUAL TEXT and compare
+the model's answer to (a) gold, (b) CODI's own greedy answer.
+
+Two input formats:
+  text           : [question, projected_tokens]  (no <|bocot|>/<|eocot|>)
+  latent_via_text: [question, <|bocot|>, projected_tokens, <|eocot|>]
+                   — matches CODI's training structure
+
+Baselines (what happens WITHOUT soft prompts):
+
+   baseline                                  gold%   agree w/ CODI%
+   CODI (real latent reasoning)              38.87   100.00
+   [q, <|bocot|>, <|eocot|>]                       31.64   63.87   ← empty structural wrapper
+   [q] (question only)                       25.78   39.06
+
+K sweep (first 128 problems, latent_via_text mode):
+
+   K    mean cos  gold%   agree%   agree|CODI_correct   agree|CODI_wrong
+    16    0.9859   31.25   53.91   70.59  (n=51)       42.86  (n=77)
+    32    0.9865   28.12   41.41   64.71  (n=51)       25.97  (n=77)
+    64    0.9991   22.66   32.81   49.02  (n=51)       22.08  (n=77)
+
+Full K=32 pipeline on all 512 problems:
+   mode                   gold%   agree%   agree|CODI_correct   agree|CODI_wrong
+   text                    6.84   10.55   14.57  (n=199)       7.99  (n=313)
+   latent_via_text        24.41   38.09   55.78  (n=199)      26.84  (n=313)
+
+>>> Conclusion C: behavioral equivalence FAILS across the board.
+    Key findings:
+
+    1. The empty wrapper [q, <|bocot|>, <|eocot|>] already recovers 63.9%
+       of CODI's answers and 31.6% gold accuracy.  Most of CODI's behavior
+       comes from question + structural markers, not from the specific
+       content of the latent reasoning positions.
+
+    2. Inserting the projected tokens between <|bocot|> and <|eocot|>
+       performs WORSE than the empty wrapper (38% agree vs 64%). The
+       projection is adversarial noise from the model's point of view.
+
+    3. Inverse scaling in K: higher K means MUCH better reconstruction
+       cosine (K=64 reaches 0.999) yet WORSE behavioral equivalence
+       (K=16 gold 31%, K=64 gold 23%). More capacity lets the optimizer
+       find solutions further off the token-reachable manifold.
+
+    4. Without structural markers the projection is catastrophic: the
+       K=32 'text' mode (just [q, projected]) gets only 6.8% gold.
+
+======================================================================
+ OVERALL INTERPRETATION
+======================================================================
+
+The user's diagnostic maps to: 'A high but C fails → the states are
+text-reachable but nearest-token projection is lossy.'  We strongly
+confirm this: reconstruction cosine saturates near 1.0, projected text is
+pure noise, and behavior transfers poorly.
+
+More specifically, the INVERSE SCALING in K (lower K gives better
+behavior) is diagnostic: with few soft embeddings the optimizer is
+squeezed closer to the token-reachable manifold and the projection is
+less lossy. This is consistent with a language-model prior regularizer
+being the right fix (user's suggestion at the end of the spec).
+
+Additionally, the empty_latent baseline is a striking surprise: simply
+tokenizing <|bocot|><|eocot|> around the question recovers 64% of CODI's
+output behavior. This suggests CODI's latent reasoning contributes only
+a modest ~7% absolute accuracy gain (31.6% → 38.9%) on top of the model's
+zero-shot capability elicited by the trained structural markers. The
+projection approach therefore has at most ~7 pts of 'content' to recover,
+but loses most of it due to projection lossiness.
