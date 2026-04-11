@@ -2,10 +2,9 @@
 import os
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 
 CKPT_DIR = "models/codi_llama1b"
-BASE_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
 # CODI hyperparameters from scripts/test_llama1b.sh
 LORA_R = 128
@@ -55,9 +54,11 @@ def load_codi(dtype=torch.bfloat16, device="cpu"):
 
     Returns (model, projection, tokenizer).
     """
-    print("loading base model:", BASE_NAME)
-    model = AutoModelForCausalLM.from_pretrained(BASE_NAME, torch_dtype=dtype)
-    # Add the 3 special tokens (PAD/BOT/EOT)
+    print("instantiating Llama from local config (random init)")
+    config = AutoConfig.from_pretrained(CKPT_DIR)
+    config.torch_dtype = dtype
+    model = AutoModelForCausalLM.from_config(config, torch_dtype=dtype)
+    # Add the 3 special tokens (PAD/BOT/EOT) — CODI vocab is 128259
     model.resize_token_embeddings(128259)
 
     print("loading codi state dict")
