@@ -1,0 +1,128 @@
+================================================================
+ LM PRIOR SWEEP: does an LM prior fix the Goodhart failure?
+================================================================
+
+Setup:
+  N=64 problems (first 64 of GSM8K test)
+  K=32 soft prompt tokens
+  Reference LM: fresh base Llama-3.2-1B (no CODI LoRA)
+  LM loss: cross-entropy between
+             softmax(sharpness * cos(e_i, embed_v))
+           and the reference LM's autoregressive predictive logits at
+           position i-1. Sharpness=50.0. Specials masked out.
+  Multi-host: 4 TPU workers in parallel, one lm_weight per worker.
+
+
+1. RECONSTRUCTION QUALITY (cosine similarity to h_target)
+
+    lm_w    mean    median    min       pct>0.95
+    0.1     0.9730  0.9987    0.1480    95.3%
+    0.3     0.9652  0.9985    0.0597    95.3%
+    1.0     0.8755  0.9962    0.0688    82.8%
+    3.0     0.8512  0.9904   -0.0020    82.8%
+
+    no-prior K=32 (for reference, same problems):
+            0.9865  0.9986    --        98%+
+
+    Observation: at lm_w<=0.3 the reconstruction stays almost as good
+    as without any prior. At lm_w>=1.0 the optimizer can't fully reach
+    h_target — the tension between "match the latent state" and "look
+    like a natural token sequence" starts to bite.
+
+
+2. BEHAVIORAL EQUIVALENCE (feed projected tokens as TEXT, check the
+   model's answer)
+
+    (a) mode = text:  [q, projected_tokens]  (no <|bocot|>/<|eocot|>)
+
+    lm_w    gold%   agree w/ CODI%
+    0.1     7.81    6.25
+    0.3     6.25    7.81
+    1.0     0.00    1.56
+    3.0     3.12    3.12
+
+    (b) mode = latent_via_text: [q, <|bocot|>, projected_tokens, <|eocot|>]
+
+    lm_w    gold%   agree%   agree|correct   agree|wrong
+    0.1     21.88   37.50    50.00  (n=22)   28.57  (n=42)
+    0.3     14.06   31.25    40.91  (n=22)   26.19  (n=42)
+    1.0     20.31   31.25    40.91  (n=22)   26.19  (n=42)
+    3.0     12.50   32.81    40.91  (n=22)   28.57  (n=42)
+
+    Baselines on the full 512:
+        CODI (real latent reasoning)              38.87  100.00
+        [q, <|bocot|>, <|eocot|>]   empty wrapper  31.64   63.87
+        question only [q]                          25.78   39.06
+        K=32 no prior, latent_via_text             24.41   38.09
+        K=32 no prior, text                         6.84   10.55
+
+
+3. WHAT DO THE PROJECTED TOKENS LOOK LIKE?
+
+    lm_w = 0.1 (cos=0.973):
+      Best:  ,...
+. the,. a,, and,.. of
+..,.
+ a. the,.,,.
+      Med.:     . in,   ,, a,,,  the  in 2 in 1 .  and ..
+
+    lm_w = 0.3 (cos=0.965):
+      Best:   .. in.. . , ,. . .....,,. the,,.. to
+
+    lm_w = 1.0 (cos=0.876):
+      Best:  ( of and is. ...,..., of.......
+  the,.. . the the
+
+    lm_w = 3.0 (cos=0.851):
+      Best: .
+
+ the,,.,.   the,,.... P.... ,,...,...:
+
+    No-prior K=32 (for comparison):
+      Best:  actually|adar|275| ~|/u| altercation|<|begin_of_text|>|.|...|<|eocot|>
+
+    So WITH the LM prior, the tokens are common English stopwords and
+    punctuation (`,`, `.`, ` the`, ` of`, ` in`, `a`, `and`).  They are
+    much more "readable" than the raw no-prior gibberish, but NONE of
+    them contain digits from the problem or math reasoning content.
+
+
+4. CONCLUSION
+
+    The LM prior successfully moves the projected tokens onto the
+    natural-text manifold — instead of random unicode / special tokens,
+    we now get grammatical stopword chains.
+
+    But it does NOT carry the reasoning content. Behavioral equivalence
+    is not improved by the LM prior: the best config (lm_w=0.1) gets
+    21.88% gold / 37.5% agreement, roughly the same as no-prior K=32
+    (24.41% / 38.09%). Both are still WORSE than the empty-wrapper
+    baseline (31.64% / 63.87%).
+
+    Why: the LM prior is SELF-REFERENTIAL — it asks "is e_i plausible
+    as the next token given the prior soft embeddings e_<i?". Given a
+    weird leading context, common fillers ('the', ',', '.') are always
+    the minimum-surprise answer. So the optimizer finds a sequence of
+    filler tokens whose hidden-state trajectory happens to land at
+    h_target, but whose content is just as meaningless as before.
+
+    A real fix would need a non-self-referential prior, e.g.:
+      (a) Teacher-forced discrete token search with straight-through
+          estimator — each step, hard-project to argmax, feed REAL
+          token embeddings to the ref LM, compute auto-regressive log
+          prob, backprop via STE.
+      (b) Explicit beam search over token sequences with reconstruction
+          as the reward.
+      (c) Target CODI's final answer logits rather than h_target —
+          a behavioral criterion that sidesteps the hidden-state
+          adversarial manifold entirely.
+
+    All three are more work and I'm stopping here to report results
+    rather than proceed without discussion.
+
+    Main takeaway (reinforced): the empty-structural-wrapper baseline
+    ([q, <|bocot|>, <|eocot|>] with NO reasoning content whatsoever)
+    remains the strongest way to make the model behave like CODI on
+    this task. CODI's latent reasoning contributes ~7pp of gold accuracy
+    over the wrapper, and none of our projection/reconstruction
+    approaches have been able to transfer even that residual gain.

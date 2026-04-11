@@ -1,0 +1,61 @@
+`torch_dtype` is deprecated! Use `dtype` instead!
+`torch_dtype` is deprecated! Use `dtype` instead!
+The new embeddings will be initialized from a multivariate normal distribution that has old embeddings' mean and covariance. As described in this article: https://nlp.stanford.edu/~johnhew/vocab-expansion.html. To disable this, use `mean_resizing=False`
+loading model...
+instantiating Llama from local config (random init)
+loading codi state dict
+merging LoRA into 16 layers
+building projection module
+loading tokenizer (use_fast=False matches CODI training)
+LM prior run: N=64 K=32 lm_weight=3.0 lm_sharpness=50.0 lm_ref=base
+mean cos = 0.8512  median = 0.9904
+
+=== Sample projected sequences (sorted by cos) ===
+  [49] cos=0.9970  gold=30.0  codi=30.0
+       .
+
+ the,,.,.   the,,.... P.... ,,...,...:
+  [53] cos=0.9957  gold=40.0  codi=400.0
+        and..,..,......,.... of, of,,,, the  the ,, to
+  [5] cos=0.9954  gold=64.0  codi=44.0
+        (  ( of ,... of.,...,.2  .. and., the ,....
+  [61] cos=0.9945  gold=1430.0  codi=1330.0
+        (  .. 1., ,.,.,,, of ... .. . the  . 
+  [20] cos=0.9940  gold=15.0  codi=18.33
+         and,.. . in... and of..   .. N....
+..... 
+  [36] cos=0.9927  gold=75.0  codi=150.0
+        is.., of,,,.,.,. ...... to.... and the.,,,.
+  [31] cos=0.9916  gold=80.0  codi=86.67
+       , and in. in ( M in .. (,....,..... ... to to the.,
+  [35] cos=0.9912  gold=9.0  codi=9.0
+        .
+ of of,  the the,, the the. of.. of.,, of,.,, ,, to the 
+  [40] cos=0.9904  gold=8.0  codi=8.0
+        (., and. in the the,,.,...  and.. of. (. of of,..... the
+  [52] cos=0.9894  gold=15.0  codi=15.0
+        and and., and,.. in1. to and ..... to.,  for ., the the the the 
+  [25] cos=0.9878  gold=2.0  codi=1.0
+        ,. of and of.... and.... in to,...., of, ,...,,
+  [42] cos=0.9864  gold=26.0  codi=26.0
+        of 
+, the  ... of of.,... of.,,, of the. of in  to. (,
+  [43] cos=0.9829  gold=48.0  codi=3000.0
+        to of..,. ( the, . ( I. ...   in,  ...,... to
+  [58] cos=0.9710  gold=57.0  codi=57.0
+        .  of the is,.,, ..,.,,..  for.. of. the..,. the of
+  [16] cos=0.1691  gold=230.0  codi=110.0
+        (,, (,,, of . and and of ( of the  ..,.,., the the,...,
+
+=== mode=text ===
+  vs gold:       2/64 = 3.12%
+  vs CODI:       2/64 = 3.12%
+  when CODI correct: 1/22 = 4.55%
+  when CODI wrong  : 1/42 = 2.38%
+
+=== mode=latent_via_text ===
+  vs gold:       8/64 = 12.50%
+  vs CODI:       21/64 = 32.81%
+  when CODI correct: 7/22 = 31.82%
+  when CODI wrong  : 14/42 = 33.33%
+
