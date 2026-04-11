@@ -44,6 +44,10 @@ def parse_args():
     p.add_argument("--q_max", type=int, default=256)
     p.add_argument("--max_new", type=int, default=24)
     p.add_argument("--out", type=str, default="data/targets.pt")
+    p.add_argument("--split", type=str, default="test", choices=["train", "test"])
+    p.add_argument("--skip_generation", action="store_true",
+                   help="do not run the greedy generation loop — save only h_target "
+                        "(useful for building training data for the oracle)")
     return p.parse_args()
 
 
@@ -94,7 +98,7 @@ def main():
     embed_layer = model.get_input_embeddings()
 
     # Dataset
-    ds = load_dataset("gsm8k", "main", split="test")
+    ds = load_dataset("gsm8k", "main", split=args.split)
     n = min(args.n, len(ds))
     ds = ds.select(range(n))
     questions = [ex["question"].strip().replace("  ", " ") for ex in ds]
@@ -162,22 +166,26 @@ def main():
                     embeds = torch.cat([embeds, eot_batch], dim=1)
                     mask = torch.cat([mask, torch.ones_like(mask[:, :1])], dim=1)
 
-            # Greedy text generation. Each step extends embeds by 1.
-            generated_ids = torch.zeros((bs, args.max_new), dtype=torch.long, device=device)
-            for gi in range(args.max_new):
-                out = model(
-                    inputs_embeds=embeds,
-                    attention_mask=mask,
-                    output_hidden_states=False,
-                    use_cache=False,
-                )
-                logits = out.logits[:, -1, : model.config.vocab_size - 1]  # exclude PAD
-                next_tok = logits.argmax(dim=-1)  # (B,)
-                generated_ids[:, gi] = next_tok
-                next_emb = embed_layer(next_tok).to(torch.bfloat16).unsqueeze(1)
-                embeds = torch.cat([embeds, next_emb], dim=1)
-                mask = torch.cat([mask, torch.ones_like(mask[:, :1])], dim=1)
-            xm.mark_step()
+            if args.skip_generation:
+                generated_ids = torch.zeros((bs, max(args.max_new, 1)), dtype=torch.long, device=device)
+                xm.mark_step()
+            else:
+                # Greedy text generation. Each step extends embeds by 1.
+                generated_ids = torch.zeros((bs, args.max_new), dtype=torch.long, device=device)
+                for gi in range(args.max_new):
+                    out = model(
+                        inputs_embeds=embeds,
+                        attention_mask=mask,
+                        output_hidden_states=False,
+                        use_cache=False,
+                    )
+                    logits = out.logits[:, -1, : model.config.vocab_size - 1]  # exclude PAD
+                    next_tok = logits.argmax(dim=-1)  # (B,)
+                    generated_ids[:, gi] = next_tok
+                    next_emb = embed_layer(next_tok).to(torch.bfloat16).unsqueeze(1)
+                    embeds = torch.cat([embeds, next_emb], dim=1)
+                    mask = torch.cat([mask, torch.ones_like(mask[:, :1])], dim=1)
+                xm.mark_step()
 
         # Pull results to CPU
         h_target_cpu = h_target.detach().to("cpu").to(torch.float32)
@@ -193,16 +201,19 @@ def main():
             pred_strs[s + i] = text
             pred_nums[s + i] = extract_answer_number(text)
 
-        n_correct = sum(1 for k in range(s, e) if pred_nums[k] == golds[k])
-        print(
-            f"batch {bi+1}/{n_batches}  ({s}..{e-1})  correct={n_correct}/{bs}  "
-            f"sample: {pred_strs[s][:60]!r}",
-            flush=True,
-        )
+        if args.skip_generation:
+            print(f"batch {bi+1}/{n_batches}  ({s}..{e-1})  h_target_norm_avg={h_target_cpu.norm(dim=-1).mean().item():.1f}", flush=True)
+        else:
+            n_correct = sum(1 for k in range(s, e) if pred_nums[k] == golds[k])
+            print(
+                f"batch {bi+1}/{n_batches}  ({s}..{e-1})  correct={n_correct}/{bs}  "
+                f"sample: {pred_strs[s][:60]!r}",
+                flush=True,
+            )
 
-    # Final accuracy
-    correct = sum(1 for k in range(n) if pred_nums[k] == golds[k])
-    print(f"\noverall greedy accuracy: {correct}/{n} = {100*correct/n:.2f}%", flush=True)
+    if not args.skip_generation:
+        correct = sum(1 for k in range(n) if pred_nums[k] == golds[k])
+        print(f"\noverall greedy accuracy: {correct}/{n} = {100*correct/n:.2f}%", flush=True)
 
     # Save
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
