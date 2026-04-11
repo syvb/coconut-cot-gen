@@ -1,5 +1,8 @@
 # coconut-cot-gen
 
+> _All code and writing in this repository was produced by Claude (Anthropic)
+> under human direction._
+
 Can we recover readable chain-of-thought text from the continuous latent
 reasoning states of a CODI model? This repo runs the full experiment on
 `bcywinski/codi_llama1b-answer_only` (CODI-trained Llama-3.2-1B) against
