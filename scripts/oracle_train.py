@@ -61,6 +61,14 @@ def parse_args():
                    help="use only first N train problems (-1 = all)")
     p.add_argument("--eval_every", type=int, default=1, help="eval every N epochs")
     p.add_argument("--warmup_steps", type=int, default=50)
+    p.add_argument("--grad_clip", type=float, default=0.5,
+                   help="per-element grad clip value (XLA-safe alternative to clip_grad_norm_)")
+    p.add_argument("--refine_iters", type=int, default=1,
+                   help="number of oracle forward passes per step (1 = no refinement, "
+                        "2 = pass1 output feeds pass2 slot inputs, etc.)")
+    p.add_argument("--no_query_embeds", action="store_true",
+                   help="Freeze query_embeds at zero. Forces the oracle to rely on "
+                        "h_target + RoPE position alone to distinguish output slots.")
     return p.parse_args()
 
 
@@ -144,12 +152,20 @@ class Oracle(nn.Module):
         nn.init.zeros_(self.h_proj[0].bias)
         nn.init.zeros_(self.h_proj[2].weight)   # output layer still starts at zero
         nn.init.zeros_(self.h_proj[2].bias)
-        # K learnable "query" embeddings that act as placeholders for the output slots
+        # K learnable "query" embeddings that act as placeholders for the output slots.
+        # Init small; the `use_query_embeds` flag controls whether they are trained
+        # (when False, the queries stay at ~0 and the slots are distinguished only
+        # by the per-slot h_target injection plus RoPE).
         self.query_embeds = nn.Parameter(torch.zeros(K, H))
         nn.init.normal_(self.query_embeds, mean=0.0, std=0.02)
+        # Also scale h_proj's output up a bit so h_target has a real signal from step 0.
+        nn.init.normal_(self.h_proj[2].weight, std=0.02)
+        nn.init.zeros_(self.h_proj[2].bias)
 
-    def trainable_parameters(self):
-        params = list(self.h_proj.parameters()) + [self.query_embeds]
+    def trainable_parameters(self, use_query_embeds=True):
+        params = list(self.h_proj.parameters())
+        if use_query_embeds:
+            params.append(self.query_embeds)
         params += self.lora_params
         return params
 
@@ -188,31 +204,63 @@ def build_oracle_input(
     return embeds, mask
 
 
-def oracle_forward(oracle, q_embeds, q_mask, h_target, embed_w_bf16, bocot_embed,
-                   temperature=1.0):
-    """Run the oracle once and return (soft_embeds (B,K,H), hard_ids (B,K))."""
-    B = q_embeds.size(0)
-    H = q_embeds.size(-1)
-    K = oracle.K
-    # Project h_target into oracle embedding space
-    h_proj = oracle.project_h_target(h_target)  # (B, H), fp32
-    h_proj_bf = h_proj.to(torch.bfloat16)
-    oracle_embeds, oracle_mask = build_oracle_input(
-        q_embeds, q_mask, h_proj_bf, bocot_embed, oracle.query_embeds.to(torch.bfloat16)
+def _oracle_single_pass(oracle, q_embeds, q_mask, h_proj_bf, slot_inputs,
+                         bocot_embed, embed_w_bf16, temperature):
+    """One forward pass through the oracle with explicit inputs at the K query slots."""
+    K = slot_inputs.size(1)
+    B, q_max, H = q_embeds.shape
+    h_tok = h_proj_bf.unsqueeze(1)  # (B, 1, H)
+    bocot_tok = bocot_embed.view(1, 1, H).expand(B, 1, H).to(q_embeds.dtype)
+    embeds = torch.cat([h_tok, q_embeds, bocot_tok, slot_inputs], dim=1)
+    ones_q = torch.ones(B, 1, dtype=q_mask.dtype, device=q_mask.device)
+    mask = torch.cat(
+        [ones_q, q_mask, ones_q,
+         torch.ones(B, K, dtype=q_mask.dtype, device=q_mask.device)],
+        dim=1,
     )
-    out = oracle.base(
-        inputs_embeds=oracle_embeds,
-        attention_mask=oracle_mask,
-        use_cache=False,
-    )
-    # Query positions are at the tail: the last K positions of the sequence.
-    logits = out.logits[:, -K:, :]  # (B, K, V)
-    # Mask out specials (keep only the text-range tokens < 128000)
-    logits = logits.clone()
+    out = oracle.base(inputs_embeds=embeds, attention_mask=mask, use_cache=False)
+    logits = out.logits[:, -K:, :].clone()
     logits[:, :, 128000:] = -float("inf")
     probs = F.softmax(logits / temperature, dim=-1)
-    soft_embeds = probs @ embed_w_bf16  # (B, K, H)
-    hard_ids = logits.argmax(dim=-1)  # (B, K)
+    soft_embeds = probs @ embed_w_bf16
+    hard_ids = logits.argmax(dim=-1)
+    return soft_embeds, hard_ids, logits
+
+
+def oracle_forward(oracle, q_embeds, q_mask, h_target, embed_w_bf16, bocot_embed,
+                   temperature=1.0, refine_iters=1):
+    """Run the oracle, optionally with iterative refinement.
+
+    When refine_iters==1 this is a single forward pass using the learned query
+    embeddings (with h_target injected additively) at the K slots — same as before.
+
+    When refine_iters>1, the soft embeddings from iteration i become the slot
+    inputs for iteration i+1. Gradients flow through every iteration (no
+    detach), giving the model a chance to coordinate slot choices across
+    iterations without any autoregressive sequential loop.
+    """
+    B, q_max, H = q_embeds.shape
+    K = oracle.K
+    h_proj = oracle.project_h_target(h_target)  # fp32
+    h_proj_bf = h_proj.to(torch.bfloat16)
+
+    # Initial slot inputs = learned query + h_target (same as before)
+    query_plus_h = (oracle.query_embeds.to(torch.bfloat16).unsqueeze(0).expand(B, K, H)
+                    + h_proj_bf.unsqueeze(1))
+    slot_inputs = query_plus_h
+
+    soft_embeds = hard_ids = logits = None
+    for it in range(refine_iters):
+        soft_embeds, hard_ids, logits = _oracle_single_pass(
+            oracle, q_embeds, q_mask, h_proj_bf, slot_inputs,
+            bocot_embed, embed_w_bf16, temperature,
+        )
+        if it < refine_iters - 1:
+            # Feed THIS iteration's soft embeds back as inputs for the next.
+            # Still add h_target additively so the refinement keeps the target
+            # signal explicit at every iter.
+            slot_inputs = soft_embeds + h_proj_bf.unsqueeze(1)
+
     return soft_embeds, hard_ids, logits
 
 
@@ -248,7 +296,7 @@ def codi_recon_forward(codi, q_ids, q_mask, soft_embeds, bocot_embed, eocot_embe
 
 def evaluate(oracle, codi, tokenizer, test_data, embed_layer, embed_w_bf16,
              bocot_embed, eocot_embed, K, batch, device, temperature,
-             faithfulness=True):
+             faithfulness=True, refine_iters=1):
     """Return dict of metrics and a few decoded samples."""
     h_targets = test_data["h_targets"]  # (N, H)
     input_ids_all = test_data["input_ids"][:, :-1]   # drop bot
@@ -273,7 +321,8 @@ def evaluate(oracle, codi, tokenizer, test_data, embed_layer, embed_w_bf16,
             q_embeds = embed_layer(q_ids).to(torch.bfloat16)
 
             soft_embeds, hard_ids, _ = oracle_forward(
-                oracle, q_embeds, q_mask, h_t, embed_w_bf16, bocot_embed, temperature
+                oracle, q_embeds, q_mask, h_t, embed_w_bf16, bocot_embed, temperature,
+                refine_iters=refine_iters,
             )
             h_out = codi_recon_forward(
                 codi, q_ids, q_mask, soft_embeds, bocot_embed, eocot_embed, embed_layer
@@ -289,7 +338,7 @@ def evaluate(oracle, codi, tokenizer, test_data, embed_layer, embed_w_bf16,
                 h_t_swapped = torch.cat([h_t[1:], h_t[:1]], dim=0)
                 soft_swp, _, _ = oracle_forward(
                     oracle, q_embeds, q_mask, h_t_swapped, embed_w_bf16,
-                    bocot_embed, temperature
+                    bocot_embed, temperature, refine_iters=refine_iters,
                 )
                 h_out_swp = codi_recon_forward(
                     codi, q_ids, q_mask, soft_swp, bocot_embed, eocot_embed, embed_layer
@@ -352,9 +401,13 @@ def main():
     for p_ in oracle.lora_params:
         p_.data = p_.data.to(torch.float32)
     oracle.query_embeds.data = oracle.query_embeds.data.to(torch.float32)
-    trainable = oracle.trainable_parameters()
+    if args.no_query_embeds:
+        # Zero out and freeze
+        oracle.query_embeds.data.zero_()
+        oracle.query_embeds.requires_grad_(False)
+    trainable = oracle.trainable_parameters(use_query_embeds=not args.no_query_embeds)
     n_trainable = sum(p.numel() for p in trainable)
-    print(f"oracle trainable params: {n_trainable:,}")
+    print(f"oracle trainable params: {n_trainable:,}  (no_query_embeds={args.no_query_embeds})")
 
     # --- Load training data ---
     print("loading train h_targets:", args.train_targets)
@@ -374,15 +427,46 @@ def main():
 
     opt = torch.optim.AdamW(trainable, lr=args.lr, betas=(0.9, 0.95), weight_decay=0.0)
 
-    # LR warmup
+    steps_per_epoch = (N_train + args.batch - 1) // args.batch
+    total_steps = steps_per_epoch * args.epochs
+
+    # LR warmup + cosine decay to 10% of peak
     def lr_at(step):
         if step < args.warmup_steps:
             return args.lr * (step + 1) / args.warmup_steps
-        return args.lr
-
-    steps_per_epoch = (N_train + args.batch - 1) // args.batch
-    total_steps = steps_per_epoch * args.epochs
+        progress = (step - args.warmup_steps) / max(1, total_steps - args.warmup_steps)
+        progress = min(max(progress, 0.0), 1.0)
+        min_lr_frac = 0.1
+        cos_factor = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return args.lr * (min_lr_frac + (1 - min_lr_frac) * cos_factor)
     print(f"training: {args.epochs} epochs × {steps_per_epoch} steps = {total_steps} steps")
+
+    # Best-checkpoint tracking (keep a CPU snapshot of the oracle state at peak val cos)
+    best_cos = -1.0
+    best_epoch = -1
+    best_state = None
+    best_proj_ids = None
+    best_cos_all = None
+    best_samples = None
+
+    def snapshot_oracle_state():
+        """Pull every trainable param to CPU without detaching from autograd grad state."""
+        sd = {
+            "query_embeds": oracle.query_embeds.detach().clone().cpu(),
+        }
+        for name, p_ in oracle.h_proj.named_parameters():
+            sd[f"h_proj.{name}"] = p_.detach().clone().cpu()
+        for i_, layer in enumerate(oracle.base.model.layers):
+            for mod_name in ("self_attn", "mlp"):
+                mod = getattr(layer, mod_name)
+                for attr in ("q_proj", "k_proj", "v_proj", "o_proj",
+                             "up_proj", "down_proj", "gate_proj"):
+                    if hasattr(mod, attr):
+                        w = getattr(mod, attr)
+                        if isinstance(w, SimpleLoRA):
+                            sd[f"layer{i_}.{mod_name}.{attr}.A"] = w.lora_A.detach().clone().cpu()
+                            sd[f"layer{i_}.{mod_name}.{attr}.B"] = w.lora_B.detach().clone().cpu()
+        return sd
 
     step = 0
     for epoch in range(args.epochs):
@@ -411,6 +495,11 @@ def main():
             cos = F.cosine_similarity(h_out.float(), h_t, dim=-1)
             loss = (1.0 - cos).mean()
             loss.backward()
+            # XLA-safe per-element grad clip (avoids the clip_grad_norm_ issue)
+            with torch.no_grad():
+                for p_ in trainable:
+                    if p_.grad is not None:
+                        p_.grad.clamp_(-args.grad_clip, args.grad_clip)
             # Manual LR schedule
             lr_now = lr_at(step)
             for pg in opt.param_groups:
@@ -437,45 +526,50 @@ def main():
             metrics, hard_ids, cos_all = evaluate(
                 oracle, codi, tokenizer, test, embed_layer, embed_w_bf16,
                 bocot_embed, eocot_embed, args.K, args.batch, device, args.temperature,
-                faithfulness=True,
+                faithfulness=True, refine_iters=args.refine_iters,
             )
+            improved = metrics["mean_cos"] > best_cos
+            marker = "  **BEST**" if improved else ""
             print(
                 f"  [test] mean_cos={metrics['mean_cos']:.4f}  "
                 f"median={metrics['median_cos']:.4f}  min={metrics['min_cos']:.4f}  "
                 f"pct>0.95={metrics['pct_gt_095']:.1f}%  "
-                f"swapped_cos={metrics['mean_cos_swapped']:.4f}",
+                f"swapped_cos={metrics['mean_cos_swapped']:.4f}{marker}",
                 flush=True,
             )
             for i, (s, c, g) in enumerate(zip(metrics["samples"], metrics["samples_cos"],
                                               metrics["samples_gold"])):
                 print(f"    sample[{i}] cos={c:.3f} gold={g}: {s!r}")
+            if improved:
+                best_cos = metrics["mean_cos"]
+                best_epoch = epoch + 1
+                best_state = snapshot_oracle_state()
+                best_proj_ids = hard_ids.clone()
+                best_cos_all = cos_all.clone()
+                best_samples = metrics.copy()
 
-    # Save oracle weights + final eval artifacts
+    # Save BEST checkpoint (the peak validation snapshot) rather than final state
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    save_sd = {
-        "query_embeds": oracle.query_embeds.detach().cpu(),
-    }
-    for name, p_ in oracle.h_proj.named_parameters():
-        save_sd[f"h_proj.{name}"] = p_.detach().cpu()
-    for i, layer in enumerate(oracle.base.model.layers):
-        for mod_name in ("self_attn", "mlp"):
-            mod = getattr(layer, mod_name)
-            for attr in ("q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj", "gate_proj"):
-                if hasattr(mod, attr):
-                    w = getattr(mod, attr)
-                    if isinstance(w, SimpleLoRA):
-                        save_sd[f"layer{i}.{mod_name}.{attr}.A"] = w.lora_A.detach().cpu()
-                        save_sd[f"layer{i}.{mod_name}.{attr}.B"] = w.lora_B.detach().cpu()
-
-    # Also save final test eval artifacts
+    save_state = best_state if best_state is not None else snapshot_oracle_state()
+    save_cos = best_cos_all if best_cos_all is not None else cos_all
+    save_proj = best_proj_ids if best_proj_ids is not None else hard_ids
+    print(f"\nBEST epoch={best_epoch}  mean_cos={best_cos:.4f}")
+    if best_samples is not None:
+        print("BEST samples (epoch {}):".format(best_epoch))
+        for i, (s, c, g) in enumerate(zip(best_samples["samples"],
+                                           best_samples["samples_cos"],
+                                           best_samples["samples_gold"])):
+            print(f"  sample[{i}] cos={c:.3f} gold={g}: {s!r}")
     torch.save(
         {
-            "oracle_state": save_sd,
-            "test_final_cos": cos_all,
-            "test_final_proj_ids": hard_ids,
+            "oracle_state": save_state,
+            "test_final_cos": save_cos,
+            "test_final_proj_ids": save_proj,
             "K": args.K,
             "lora_r": args.lora_r,
             "lora_alpha": args.lora_alpha,
+            "best_epoch": best_epoch,
+            "best_mean_cos": best_cos,
         },
         args.out,
     )
