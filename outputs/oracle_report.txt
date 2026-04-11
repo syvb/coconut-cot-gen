@@ -1,0 +1,154 @@
+================================================================
+ FINE-TUNED ORACLE: amortized text reconstruction of h_target
+================================================================
+
+Motivation
+----------
+Per-problem soft prompt optimization finds adversarial solutions (cos≈0.99
+but projected tokens are unicode garbage). Hypothesis: amortize the search
+into a single trained model. A neural model has (a) a strong pretrained
+natural-text prior and (b) is forced to generalize across problems, so it
+can't exploit per-problem tricks. Also: make h_target an actual INPUT to
+the oracle so we get a counterfactual faithfulness handle.
+
+Architecture
+------------
+Oracle = base Llama-3.2-1B + LoRA (r=128, alpha=32) + trainable h_proj
+(2-layer MLP Linear→GELU→Linear, output-init zero) + K learnable query
+embeddings.
+
+Input sequence (single pass, non-autoregressive):
+    [h_proj(h_target), q_tokens, <|bocot|>,
+     query_0 + h_proj(h_target), query_1 + h_proj(h_target), ..., query_{K-1} + h_proj(h_target)]
+
+h_target is injected BOTH as a prefix token AND additively onto every
+query slot — the two paths give the model both attention-time access and
+position-local access to the target vector.
+
+At each of the K query positions the oracle's logits are converted to a
+soft-token embedding:
+    e_i = softmax(logits_i / T) @ embed_tokens.weight     (T=1.0)
+
+The full candidate sequence is then fed through the FROZEN CODI model:
+    [q, <|bocot|>, e_0..e_{K-1}, <|eocot|>]
+and the last-layer residual stream at the position of e_{K-1} is taken as
+h_out. Loss = 1 - cos(h_out, h_target).
+
+Training
+--------
+- 1024 GSM8K train problems (h_target precomputed by step1 --split train)
+- AdamW, lr 2e-4, 50-step warmup, no weight decay, no grad clipping
+- batch=8, K=32, 20 epochs (~51s per epoch on TPU)
+
+Results
+-------
+Training is stable to epoch 12, after which loss climbs and test metrics
+degrade.
+
+Epoch | train avg loss | test mean cos | test swapped cos | gap
+------|----------------|---------------|------------------|------
+  4   |     0.318      |    0.692      |     0.552        | 0.140
+  8   |     0.268      |    0.732      |     0.578        | 0.154
+ 12   |     0.247      |  **0.746**    |     0.591        | 0.155  ← peak
+ 16   |     0.324      |    0.658      |     0.508        | 0.150
+ 20   |     0.300      |    0.635      |     0.479        | 0.156
+
+Comparison with per-problem optimization on the same target:
+    K=32 no prior (per-problem): mean cos = 0.983, pct > 0.95 = 96.9%
+    K=32 LM prior lm_w=0.1     : mean cos = 0.973
+    K=32 LM prior lm_w=1.0     : mean cos = 0.876
+    K=32 oracle (amortized)    : mean cos = 0.746  (peak at epoch 12)
+
+pct > 0.95 for the oracle is 0% across all epochs.
+
+Counterfactual faithfulness test
+--------------------------------
+At eval time we substitute each problem's h_target with the NEXT batch
+element's h_target (identical question), re-run the oracle, and measure
+cos against the ORIGINAL h_target.
+
+    gap = normal_cos - swapped_cos = 0.155  (epoch 12)
+
+A nonzero gap means the oracle IS using h_target (swapping it degrades
+reconstruction by 0.16 in cosine). The gap is roughly stable across
+epochs. If the oracle were ignoring h_target, gap would be ~0.
+
+Decoded samples (epoch 12, K=32)
+--------------------------------
+All samples start with the same 2-3 filler tokens (` and` / ` Question`),
+then diverge into problem-type-specific code-like fragments:
+
+    gold=18: ' andQuestion.harrayrec{...  Question  with yst for I_ ...'
+    gold=3:  ' andQuestion frac \\\\1\\  il   _ _ _ _ ...'
+    gold=70000: ' andQuestion 64 \\\\ to  ıs  }... yst for ...'
+    gold=540: ' andQuestion mod \\to as    = __  _ form ...'
+    gold=20: ' andQuestion.harrayac toidd}... with es for It Y ...'
+
+Noteworthy:
+ - `frac \\\\1\\` on the gold=3 problem (fractions!)
+ - `64 \\\\` on the gold=70000 problem (actual digits!)
+ - `mod \\to` on the gold=540 problem (modular arithmetic)
+ - `.harray`, `.hclass`, `.h` prefixes on various problems — looks like
+   LaTeX/code math fragments
+
+These are NOT readable English reasoning, but they DO encode problem-type
+information (fractions vs modular arithmetic vs numeric calculations).
+The oracle is genuinely translating h_target into content, just into a
+LaTeX/code-like sublanguage rather than natural prose.
+
+Interpretation
+--------------
+1. Reconstruction ceiling. The amortized oracle plateaus at ~0.75 cos. Per-
+   problem optimization easily reaches ~0.99. The gap between these two —
+   roughly 0.25 in cosine — is the "amortization gap" and is likely a
+   combination of two effects:
+     (a) per-problem opt finds adversarial off-manifold solutions, which an
+         amortized model is structurally prevented from reaching
+     (b) the oracle has finite capacity / is undertrained
+   We can't cleanly separate (a) and (b) from these runs alone.
+
+2. Counterfactual faithfulness. The h_target swap test gives a gap of 0.155
+   — the oracle does use h_target, but most of its output is a "backbone"
+   that is NOT h_target-dependent. This matches the decoded samples, where
+   the first ~5 tokens are identical across problems and only the middle
+   varies with h_target.
+
+3. Problem-type recovery without English readability. Decoded tokens
+   include latex/code fragments (frac, mod, raw digits) that correlate
+   with the problem type. This is a meaningful interpretability signal —
+   it's just not pretty prose. It suggests that CODI's latent state DOES
+   encode something problem-specific; the encoding is just not aligned
+   with natural language embeddings.
+
+4. Training instability past epoch 12. Both the aggressive run (lr=5e-4,
+   run 3) and the more conservative run (lr=2e-4, run 5) crash after
+   some point. The loss rises and samples collapse to repetitive tokens
+   (`TheTheThe`, `一一一一`, `################`). Needs proper grad
+   clipping (but my XLA `clip_grad_norm_` seems to freeze training — run 4
+   had exactly constant loss across all epochs, probably an XLA/lazy-
+   tensor interaction).
+
+Where this leaves us
+--------------------
+This experiment tightens the picture from the earlier per-problem work:
+ - per-problem optimization: cos≈0.99, tokens adversarial, 0% readable
+ - amortized oracle:         cos≈0.75, tokens semi-structured (latex/code),
+                             weakly h_target-dependent, still not natural
+                             English
+ - empty structural wrapper: cos N/A, 64% CODI behavior recovered
+
+None of these give readable CoT. But the amortized oracle is the FIRST
+setting where decoded tokens carry problem-type information that
+corresponds to h_target content. That is a genuine (if weak) interpretability
+signal.
+
+Things to try next
+------------------
+ - autoregressive decoding (each query conditions on previous soft embed)
+ - teacher-forced SFT warm-start on the GSM8K gold CoT, then RL with
+   reconstruction reward
+ - fix grad clipping (probably move to grad value clamping or Adam's
+   own mechanisms) to allow longer stable training
+ - patchscopes-style comparison: how does the oracle's decoded output
+   compare to what you get by just patching h_target into a
+   "In other words, " prompt and letting the base model generate?

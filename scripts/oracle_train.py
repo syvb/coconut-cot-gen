@@ -112,7 +112,17 @@ def attach_lora(model, r, alpha):
 
 
 class Oracle(nn.Module):
-    """Llama backbone + LoRA + h_target projector + K learnable query embeddings."""
+    """Llama backbone + LoRA + h_target projector + K learnable query embeddings.
+
+    h_target is injected in two places:
+    (1) As a prefix token (projected by h_proj) at the start of the input.
+    (2) Added on top of every learnable query embedding (so each query slot
+        gets a direct view of h_target).
+
+    This maximises the model's access to h_target at both attention time (via
+    the prefix token the queries attend to) and position-local modulation (via
+    the additive injection on each query slot).
+    """
 
     def __init__(self, base_model, H, K, lora_r=64, lora_alpha=16):
         super().__init__()
@@ -123,16 +133,30 @@ class Oracle(nn.Module):
         for p in self.base.parameters():
             p.requires_grad_(False)
         self.lora_params = attach_lora(self.base, lora_r, lora_alpha)
-        # h_target projector (tiny)
-        self.h_proj = nn.Linear(H, H)
-        nn.init.zeros_(self.h_proj.weight)
-        nn.init.zeros_(self.h_proj.bias)
+        # h_target projector — 2-layer MLP. Output initialized near zero so the
+        # oracle starts as base Llama but with a non-trivial gradient path.
+        self.h_proj = nn.Sequential(
+            nn.Linear(H, H),
+            nn.GELU(),
+            nn.Linear(H, H),
+        )
+        nn.init.normal_(self.h_proj[0].weight, std=0.02)
+        nn.init.zeros_(self.h_proj[0].bias)
+        nn.init.zeros_(self.h_proj[2].weight)   # output layer still starts at zero
+        nn.init.zeros_(self.h_proj[2].bias)
         # K learnable "query" embeddings that act as placeholders for the output slots
         self.query_embeds = nn.Parameter(torch.zeros(K, H))
         nn.init.normal_(self.query_embeds, mean=0.0, std=0.02)
 
     def trainable_parameters(self):
-        return [self.h_proj.weight, self.h_proj.bias, self.query_embeds] + self.lora_params
+        params = list(self.h_proj.parameters()) + [self.query_embeds]
+        params += self.lora_params
+        return params
+
+    def project_h_target(self, h_target):
+        """Apply h_proj in fp32 for stability; return fp32 tensor (B, H)."""
+        # The h_proj layers stay in fp32
+        return self.h_proj(h_target.to(next(self.h_proj.parameters()).dtype))
 
 
 # ----------------------------------------------------------------------------
@@ -143,17 +167,19 @@ class Oracle(nn.Module):
 def build_oracle_input(
     q_embeds: torch.Tensor,           # (B, q_max, H) bf16
     q_mask: torch.Tensor,             # (B, q_max)
-    h_target_proj: torch.Tensor,      # (B, H) bf16
+    h_target_proj: torch.Tensor,      # (B, H) bf16 — used as prefix + added to each query
     bocot_embed: torch.Tensor,        # (H,) bf16
     query_embeds: torch.Tensor,       # (K, H) bf16
 ):
     B, q_max, H = q_embeds.shape
     K = query_embeds.shape[0]
-    # prefix token = h_target_proj unsqueezed
+    # Prefix token = h_target_proj unsqueezed
     h_tok = h_target_proj.unsqueeze(1).to(q_embeds.dtype)  # (B, 1, H)
     bocot_tok = bocot_embed.view(1, 1, H).expand(B, 1, H).to(q_embeds.dtype)
-    query_tok = query_embeds.view(1, K, H).expand(B, K, H).to(q_embeds.dtype)
-    embeds = torch.cat([h_tok, q_embeds, bocot_tok, query_tok], dim=1)  # (B, 1+q+1+K, H)
+    # Each query slot = learned query + projected h_target
+    query_base = query_embeds.view(1, K, H).expand(B, K, H).to(q_embeds.dtype)
+    query_plus_h = query_base + h_target_proj.unsqueeze(1).to(q_embeds.dtype)  # (B, K, H)
+    embeds = torch.cat([h_tok, q_embeds, bocot_tok, query_plus_h], dim=1)  # (B, 1+q+1+K, H)
     ones_q = torch.ones(B, 1, dtype=q_mask.dtype, device=q_mask.device)
     mask = torch.cat(
         [ones_q, q_mask, ones_q, torch.ones(B, K, dtype=q_mask.dtype, device=q_mask.device)],
@@ -169,7 +195,7 @@ def oracle_forward(oracle, q_embeds, q_mask, h_target, embed_w_bf16, bocot_embed
     H = q_embeds.size(-1)
     K = oracle.K
     # Project h_target into oracle embedding space
-    h_proj = oracle.h_proj(h_target.to(oracle.h_proj.weight.dtype))  # (B, H), fp32
+    h_proj = oracle.project_h_target(h_target)  # (B, H), fp32
     h_proj_bf = h_proj.to(torch.bfloat16)
     oracle_embeds, oracle_mask = build_oracle_input(
         q_embeds, q_mask, h_proj_bf, bocot_embed, oracle.query_embeds.to(torch.bfloat16)
@@ -427,10 +453,10 @@ def main():
     # Save oracle weights + final eval artifacts
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     save_sd = {
-        "h_proj.weight": oracle.h_proj.weight.detach().cpu(),
-        "h_proj.bias": oracle.h_proj.bias.detach().cpu(),
         "query_embeds": oracle.query_embeds.detach().cpu(),
     }
+    for name, p_ in oracle.h_proj.named_parameters():
+        save_sd[f"h_proj.{name}"] = p_.detach().cpu()
     for i, layer in enumerate(oracle.base.model.layers):
         for mod_name in ("self_attn", "mlp"):
             mod = getattr(layer, mod_name)
