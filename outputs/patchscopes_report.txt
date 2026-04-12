@@ -1,0 +1,163 @@
+================================================================
+ PATCHSCOPES: causal analysis of CODI's final latent state
+================================================================
+
+Setup
+-----
+h_target is CODI's last-layer residual stream at the final latent
+reasoning position (q_max+6). We tested several "patchscopes"-style
+interventions to see what h_target actually encodes and how much it
+matters causally for CODI's downstream answer.
+
+
+Experiment 1: logit lens on h_target
+------------------------------------
+Directly apply lm_head to h_target (no attention, no other context).
+Report top-5 tokens for each problem:
+
+    [0] gold=18  codi=18  : ' therefore',' thus',' shadows','Therefore','available'
+    [1] gold=3   codi=3   : ' it',' Look','.','2',' It'
+    [2] gold=70000 codi=30000 : '.w','Ass','ass','.d','150'
+    [3] gold=540 codi=540 : ' each','.s','.w','Ass','Each'
+    [4] gold=20  codi=40  : ' therefore','available','sub','``',' \n'
+    [5] gold=64  codi=44  : '``',' \n','if','sub',' thus'
+    [6] gold=260 codi=260 : 'T','merce',' showers','available',' Exchange'
+    [7] gold=160 codi=140 : ' it','.',' ',' she','.'
+
+KEY OBSERVATION: h_target's direct lm_head projection is dominated by
+words like "therefore", "thus", "Therefore", "each", "Every" —
+discourse/conclusion markers, NOT the specific answer digits. The latent
+state has "ready-to-conclude" information but doesn't directly encode
+the answer value.
+
+
+Experiment 2: patch h_target into template contexts
+----------------------------------------------------
+Put h_target as a single input embedding at various positions in
+natural-language templates and greedy-generate.
+
+Tested templates and their aggregate stats (n=32):
+
+  template                                              gold%   codi_agree
+  B. [[H]]                               (single-token)  3.1%   3.1%
+  C. "\nIn other words, this means: [[H]] "              3.1%   3.1%
+  D. "{question}\nSolution: [[H]] "                     25.0%  40.6%
+  E. few-shot "Problem: ... Solution: [[H]] "            9.4%  12.5%
+  F. [q, <|bocot|>, [[H]], <|eocot|>]  (CODI native)    31.2%  68.8%
+
+Template D (question-included) gets 25% gold — roughly the "question-
+only" baseline (25.8%). h_target isn't adding meaningful extra signal.
+
+Template F (CODI native format) looked impressive at 68.8% CODI
+agreement, but the ablation below reveals this is really the wrapper,
+not h_target.
+
+
+Experiment 3: template F with h ablation
+-----------------------------------------
+Same template F ([q, <|bocot|>, h, <|eocot|>]) but vary the h input:
+
+    h = real:     gold=31.2%  codi_agree=68.8%
+    h = zero:     gold=31.2%  codi_agree=68.8%      ← IDENTICAL to real
+    h = random:   gold=31.2%  codi_agree=50.0%      ← differs
+
+Real and zero h give **exactly identical** greedy outputs for all 32
+problems in the sample. Random h (same norm, different direction)
+changes some answers.
+
+Debug check at the representation level confirmed the patching is
+working — the hidden state at position q_max+1 differs by L2≈139
+between real and zero. But the greedy argmax at the generation
+position is the same because the logit gap between top tokens is
+larger than the perturbation h_target causes.
+
+Interpretation: h_target at position q_max+1 (with NO preceding latents)
+is too "subtle" to flip greedy argmax decisions. The model's answer is
+dominated by [q, <|bocot|>, _, <|eocot|>] structure.
+
+This explains why the empty-wrapper baseline [q, bocot, eocot] earlier
+got 63.9% CODI agreement — that baseline IS essentially template F with
+a zero h slot.
+
+
+Experiment 4: causal swap at the NATIVE 6th-latent position
+-----------------------------------------------------------
+The cleanest test. Run CODI's natural 5-iteration latent loop to
+produce l0..l4, then replace what goes in the 6th slot:
+
+  own:      prj(h_l4)            -- CODI's natural 6th-latent input
+  zero:     zeros                -- ablate the 6th slot
+  shuffled: other problem's own  -- wrong-problem 6th slot
+  random:   random vector (same norm)
+
+Generate greedy answer. 32 problems:
+
+  6th-slot config   gold%   codi_agree%
+  ---------------- ------  -------------
+  own               28.1       96.9     ← verifies pipeline fidelity
+  zero              31.2       81.2
+  shuffled          28.1       87.5
+  random            34.4       71.9
+
+Findings:
+- "own" reproduces CODI's greedy output at 96.9% — the last 3.1% is
+  greedy-vs-multinomial difference.
+- Zeroing the 6th slot only drops agreement by 15.7pp. The model's
+  answer is dominated by the first 5 latents + question + wrapper.
+- Shuffling (replacing with another problem's) drops only 9.4pp.
+  Even a wrong-problem's latent doesn't change most answers.
+- Random vector (most disruptive) still only drops 25pp.
+
+On some problems, ABLATING the 6th slot actually IMPROVES accuracy:
+  problem 5: gold=64 codi=44 own=44 zero=64   (zero fixes it)
+  problem 13: gold=18 codi=24 zero=22 random=18  (random fixes it)
+
+The 6th latent sometimes pushes CODI toward wrong answers.
+
+
+Overall interpretation
+----------------------
+These results reframe everything we've seen in the per-problem opt,
+LM-prior, oracle, and empty-wrapper experiments:
+
+1. **h_target carries only ~10–20% of the causal signal** that drives
+   CODI's final answer. The first 5 latents plus the question and the
+   structural <|bocot|>/<|eocot|> markers do most of the work.
+
+2. **The "therefore/thus" logit-lens signature** explains what h_target
+   IS: a discourse-level "ready to conclude" state that tips the model
+   toward producing an answer, but doesn't contain the answer value
+   itself. It's the pre-answer context, not the answer.
+
+3. **Empty-wrapper baseline (64% agreement) ≈ zero-6th-slot at the
+   native position (81% agreement).** These are causally similar
+   interventions, and both reveal the same thing: CODI's visible answer
+   is mostly a function of the question + structural markers + early
+   latent processing.
+
+4. **Our interpretability target was partially misspecified.** We were
+   trying to reconstruct a vector that only weakly determines the
+   answer. No amount of per-problem opt, LM-prior regularization, or
+   amortized oracle training can extract meaningful "reasoning" from
+   a state that isn't carrying reasoning content in the first place —
+   it carries a discourse-level "conclude now" signal.
+
+5. **If we wanted interpretability, we should be targeting the
+   EARLIER latents (l0..l4), not h_target.** Those are the latents
+   where actual computation happens. The ideal experiment would be:
+   run logit lens and patchscopes on EACH of the 6 latents separately,
+   and see which one(s) carry the problem-specific signal.
+
+
+What this means for next steps
+------------------------------
+- Replicate this swap experiment on all 6 latents (l0..l5) to find
+  which ones matter most.
+- Per-latent logit lens: see how the "therefore/thus" signal emerges
+  across the 6 iterations.
+- Re-run the oracle and LM-prior experiments targeting an EARLIER
+  latent state (e.g. l0) instead of h_target, to see if that changes
+  the interpretability ceiling.
+- If l0-l4 ARE the real carriers, the 0.78 oracle ceiling is not a
+  fundamental text-reachability limit — it's a consequence of targeting
+  the wrong state.

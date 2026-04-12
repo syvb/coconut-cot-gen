@@ -1,0 +1,80 @@
+========================================================================
+PATCHSCOPES RESULTS — model=codi
+========================================================================
+
+--- A. LOGIT LENS (top-5 tokens from applying lm_head to h_target) ---
+  [0] gold=18.0 codi=18.0: ' therefore', ' thus', ' shadows', 'Therefore', 'available'
+  [1] gold=3.0 codi=3.0: ' it', ' Look', '.', '2', ' It'
+  [2] gold=70000.0 codi=30000.0: '.w', 'Ass', 'ass', '.d', '150'
+  [3] gold=540.0 codi=540.0: ' each', '.s', '.w', 'Ass', 'Each'
+  [4] gold=20.0 codi=40.0: ' therefore', 'available', 'sub', '``', ' \n'
+  [5] gold=64.0 codi=44.0: '``', ' \n', 'if', 'sub', ' thus'
+  [6] gold=260.0 codi=260.0: 'T', 'merce', ' showers', 'available', ' Exchange'
+  [7] gold=160.0 codi=140.0: ' it', '.', ' ', ' she', '.'
+  [8] gold=45.0 codi=70.0: 'T', ' T', ' \n', '.t', 't'
+  [9] gold=460.0 codi=530.0: '$\n', '$', 'sub', 'elden', '*'
+
+--- B. template: '[[H]]' ---
+  [0] gold=18.0 codi=18.0: ' therefore the average age of the group is 5.5'
+  [1] gold=3.0 codi=3.0: ' Find the value of x in the equation 2x + 3x + 5x +'
+  [2] gold=70000.0 codi=30000.0: '.wa.gov\n\nThe.wa.gov domain is a top-level domain for a country. It is'
+  [3] gold=540.0 codi=540.0: ' each time the number of people in the crowd is less than 26, the number of people is'
+  [4] gold=20.0 codi=40.0: ' therefore the final answer is 2.68'
+  [5] gold=64.0 codi=44.0: ' \nThe problem is asking for the sum of the values of all the terms in the sequence 1'
+  [6] gold=260.0 codi=260.0: 'merceleseseseseseseseseseseseseseseseseseses'
+  [7] gold=160.0 codi=140.0: ' it is not a real time or memory issues, it is just a matter of how fast the brain'
+  [8] gold=45.0 codi=70.0: 'Trevor and his friends have a collection of 8.5 (rounded up) or '
+  [9] gold=460.0 codi=530.0: '$\n$\n$\n$\n$\n$\n$\n$\n$\n$\n$\n$\n$\n$\n$\n$\n$\n$\n$\n$\n'
+  STATS: gold=3.1% codi_agree=0.0% | agree|correct=0.0% (n=9) agree|wrong=0.0% (n=23)
+
+--- C. template: '\nIn other words, this means: [[H]] ' ---
+  [0] gold=18.0 codi=18.0: '1/3 of the total amount of money in the world is not available or not for sale.'
+  [1] gold=3.0 codi=3.0: '1/3 of the total amount of money in the store is not sold, not for sale.'
+  [2] gold=70000.0 codi=30000.0: '1/3 of the total amount of money in the system is not sufficient to meet the needs of'
+  [3] gold=540.0 codi=540.0: '1/3 of the total amount of money in the system is not sufficient to meet the needs of'
+  [4] gold=20.0 codi=40.0: '1/3 of the total amount of money in the world is not available or not for sale.'
+  [5] gold=64.0 codi=44.0: '1/3 of the total amount of money in the world is not available or not for sale.'
+  [6] gold=260.0 codi=260.0: '1/3 of the total amount of money in the world is not available or not for sale.'
+  [7] gold=160.0 codi=140.0: '1/3 of the total amount of money in the store is not sold, not for sale.'
+  [8] gold=45.0 codi=70.0: '1/3 of the total amount of money in the store is not for sale. 2/'
+  [9] gold=460.0 codi=530.0: '1/3 of the total amount of money in the store is not for the public. The public'
+  STATS: gold=3.1% codi_agree=3.1% | agree|correct=11.1% (n=9) agree|wrong=0.0% (n=23)
+
+--- D. template: '{q}\nSolution: [[H]] ' ---
+  [0] gold=18.0 codi=18.0: '6'
+  [1] gold=3.0 codi=3.0: '2.5'
+  [2] gold=70000.0 codi=30000.0: '150% of the cost of the house is the increase in value.\n150000'
+  [3] gold=540.0 codi=540.0: '540'
+  [4] gold=20.0 codi=40.0: '1 cup of feed per chicken per meal, 20 chickens fed 3 cups per meal = '
+  [5] gold=64.0 codi=44.0: '64'
+  [6] gold=260.0 codi=260.0: '260'
+  [7] gold=160.0 codi=140.0: '80 minutes of the 200 GB file, 80 GB * 40% = 32 GB'
+  [8] gold=45.0 codi=70.0: '250'
+  [9] gold=460.0 codi=530.0: '470'
+  STATS: gold=25.0% codi_agree=40.6% | agree|correct=66.7% (n=9) agree|wrong=30.4% (n=23)
+
+--- E. template: 'Problem: Jim has 5 apples and buys 3 more. Solution: 5 + 3 = 8.\nProblem: A train travels 60 mph for 2 hours. Solution: 60 * 2 = 120.\nProblem: {q} Solution: [[H]] ' ---
+  [0] gold=18.0 codi=18.0: '16 * 2 = 32.\nYonkers’ ducks lay 16 * 2 ='
+  [1] gold=3.0 codi=3.0: '2 + 0.5 = 2.5.\nThe total number of bolts is 2'
+  [2] gold=70000.0 codi=30000.0: "150000 * 0.5 = $75000.\nEuler's problem is about traveling the"
+  [3] gold=540.0 codi=540.0: '540'
+  [4] gold=20.0 codi=40.0: '20 * 3 = 60 cups of feed.\nEating the same amount of feed for all'
+  [5] gold=64.0 codi=44.0: '80'
+  [6] gold=260.0 codi=260.0: '120, Charleston has 160, Toulouse has 320.\n 300'
+  [7] gold=160.0 codi=140.0: '200 *.4 = 80 GB.\nThe first 80 GB takes 80 / 2'
+  [8] gold=45.0 codi=70.0: '70'
+  [9] gold=460.0 codi=530.0: '460'
+  STATS: gold=9.4% codi_agree=12.5% | agree|correct=22.2% (n=9) agree|wrong=8.7% (n=23)
+
+--- F. CODI native format [q, <|bocot|>, h_target, <|eocot|>] ---
+  [0] gold=18.0 codi=18.0: '18'
+  [1] gold=3.0 codi=3.0: '3'
+  [2] gold=70000.0 codi=30000.0: '150000'
+  [3] gold=540.0 codi=540.0: '540'
+  [4] gold=20.0 codi=40.0: '20'
+  [5] gold=64.0 codi=44.0: '64'
+  [6] gold=260.0 codi=260.0: '260'
+  [7] gold=160.0 codi=140.0: '140'
+  [8] gold=45.0 codi=70.0: '70'
+  [9] gold=460.0 codi=530.0: '530'
+  STATS: gold=31.2% codi_agree=68.8% | agree|correct=88.9% (n=9) agree|wrong=60.9% (n=23)

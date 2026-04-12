@@ -1,0 +1,80 @@
+========================================================================
+PATCHSCOPES RESULTS — model=codi
+========================================================================
+
+--- A. LOGIT LENS (top-5 tokens from applying lm_head to h_target) ---
+  [0] gold=18.0 codi=18.0: 'aligned', 'reme', 'peak', 'wan', 'owi'
+  [1] gold=3.0 codi=3.0: ' Liste', 'iane', ' Lump', 'SEC', ' intimidating'
+  [2] gold=70000.0 codi=30000.0: 'nen', ' Inner', 'rite', '.listen', 'Inner'
+  [3] gold=540.0 codi=540.0: 'toy', '型', ' ele', ' objective', 'otos'
+  [4] gold=20.0 codi=40.0: '.y', ' y', 'erm', 'ision', ' sans'
+  [5] gold=64.0 codi=44.0: 'lig', 'mph', 'pu', ' Shakespeare', 'imens'
+  [6] gold=260.0 codi=260.0: 'esis', ' passé', 'inya', 'nya', 'Already'
+  [7] gold=160.0 codi=140.0: 'alli', 'šek', '岳', ' mayor', 'esModule'
+  [8] gold=45.0 codi=70.0: ' exploded', ' department', 'apel', 'elp', 'ews'
+  [9] gold=460.0 codi=530.0: 'éra', ' Basel', 'incerely', 'cern', '/details'
+
+--- B. template: '[[H]]' ---
+  [0] gold=18.0 codi=18.0: 'ffi-fiympresure (FFM) is a fictional universe created by George W. Board'
+  [1] gold=3.0 codi=3.0: 'location: New York City, New York City, USA\n\nThe city is known for its iconic landmarks'
+  [2] gold=70000.0 codi=30000.0: ' Innerly, they are all interconnected, and they all have the same fundamental principles that govern all phenomena'
+  [3] gold=540.0 codi=540.0: "toyland's 4th-Element-Array-Array-4-Element-Array-4"
+  [4] gold=20.0 codi=40.0: " sans any prior knowledge of the previous day's events, I had planned to attend a concert on Saturday"
+  [5] gold=64.0 codi=44.0: 'ligia-induced pain relief products, such as lidocaine and lidar, are commonly used to'
+  [6] gold=260.0 codi=260.0: 'esisradatzbe"Be"UHE"Be"UHE"Be"UHE"'
+  [7] gold=160.0 codi=140.0: 'alli, a young woman, is known for her love of books and reading. She is a vor'
+  [8] gold=45.0 codi=70.0: 'elpus: United States\nUnited States is a country with 50 countries in the United States.'
+  [9] gold=460.0 codi=530.0: ' Basel, Switzerland\nThe city of Basel is one of the oldest and most famous cities in Europe,'
+  STATS: gold=0.0% codi_agree=0.0% | agree|correct=0.0% (n=9) agree|wrong=0.0% (n=23)
+
+--- C. template: '\nIn other words, this means: [[H]] ' ---
+  [0] gold=18.0 codi=18.0: '1.5 (or 150%) of the original number is being used. 25% ('
+  [1] gold=3.0 codi=3.0: '1/3 of the total amount of money in the store is not sold, not for sale.'
+  [2] gold=70000.0 codi=30000.0: '1. The number of people who have been affected by the crisis.\n2. The number of people'
+  [3] gold=540.0 codi=540.0: '1/3 of the total amount of money in the economy is not sufficient to provide adequate financial support'
+  [4] gold=20.0 codi=40.0: '1/3 of the world is not yet known to us, and we only know of it '
+  [5] gold=64.0 codi=44.0: '1/3 of the total amount of money in the world is not available or not accounted for.'
+  [6] gold=260.0 codi=260.0: '1-8 = 7  This means that there are 7 people in the world.\nThere'
+  [7] gold=160.0 codi=140.0: '1.5 (or 50% or half) of the total amount of money in the equation'
+  [8] gold=45.0 codi=70.0: '1.5 (or 150%) of the original number is being used. If the number is'
+  [9] gold=460.0 codi=530.0: '1. The researchers are studying the effects of the cold weather on the environment.\n2. They are'
+  STATS: gold=3.1% codi_agree=3.1% | agree|correct=11.1% (n=9) agree|wrong=0.0% (n=23)
+
+--- D. template: '{q}\nSolution: [[H]] ' ---
+  [0] gold=18.0 codi=18.0: '2'
+  [1] gold=3.0 codi=3.0: '3'
+  [2] gold=70000.0 codi=30000.0: '150000'
+  [3] gold=540.0 codi=540.0: '540'
+  [4] gold=20.0 codi=40.0: '20'
+  [5] gold=64.0 codi=44.0: '56'
+  [6] gold=260.0 codi=260.0: '260'
+  [7] gold=160.0 codi=140.0: '80'
+  [8] gold=45.0 codi=70.0: '70'
+  [9] gold=460.0 codi=530.0: '470'
+  STATS: gold=21.9% codi_agree=34.4% | agree|correct=55.6% (n=9) agree|wrong=26.1% (n=23)
+
+--- E. template: 'Problem: Jim has 5 apples and buys 3 more. Solution: 5 + 3 = 8.\nProblem: A train travels 60 mph for 2 hours. Solution: 60 * 2 = 120.\nProblem: {q} Solution: [[H]] ' ---
+  [0] gold=18.0 codi=18.0: '16 * 2 = 32.\nY: 56'
+  [1] gold=3.0 codi=3.0: '3.5'
+  [2] gold=70000.0 codi=30000.0: '150000 * 150000 = 22500000000000000.\nThe total cost of the'
+  [3] gold=540.0 codi=540.0: '1800.\nA total distance of 1800 meters is run by James.\n- 3 times'
+  [4] gold=20.0 codi=40.0: '20 * 3 = 60 cups of feed.\n Yumi also needs to provide her 20'
+  [5] gold=64.0 codi=44.0: '80'
+  [6] gold=260.0 codi=260.0: '120 sheep.1 Toulouse has 2 * 120 sheep = 240 sheep.2 Charleston'
+  [7] gold=160.0 codi=140.0: '200 * 0.4 = 80 GB.\n* The download takes 80 * 2'
+  [8] gold=45.0 codi=70.0: '30 * 2 = 60.\nE = 120 - 60 = 60.\nE'
+  [9] gold=460.0 codi=530.0: '460'
+  STATS: gold=9.4% codi_agree=12.5% | agree|correct=11.1% (n=9) agree|wrong=13.0% (n=23)
+
+--- F. CODI native format [q, <|bocot|>, h_target, <|eocot|>] ---
+  [0] gold=18.0 codi=18.0: '30'
+  [1] gold=3.0 codi=3.0: '3'
+  [2] gold=70000.0 codi=30000.0: '30000'
+  [3] gold=540.0 codi=540.0: '540'
+  [4] gold=20.0 codi=40.0: '40'
+  [5] gold=64.0 codi=44.0: '64'
+  [6] gold=260.0 codi=260.0: '260'
+  [7] gold=160.0 codi=140.0: '140'
+  [8] gold=45.0 codi=70.0: '70'
+  [9] gold=460.0 codi=530.0: '530'
+  STATS: gold=31.2% codi_agree=50.0% | agree|correct=77.8% (n=9) agree|wrong=39.1% (n=23)
